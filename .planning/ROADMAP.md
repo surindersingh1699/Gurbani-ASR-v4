@@ -31,7 +31,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 **Plans**: 2 plans
 
 Plans:
-- [ ] 01-01-PLAN.md — Create surt/ package with config.py, requirements.txt, and setup_pod.sh
+- [x] 01-01-PLAN.md — Create surt/ package with config.py, requirements.txt, and setup_pod.sh
 - [ ] 01-02-PLAN.md — Validate infrastructure on live RunPod pod (checkpoint)
 
 ### Phase 2: Data Pipeline and Model Initialization
@@ -87,7 +87,7 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Project Setup and Infrastructure | 0/2 | Not started | - |
+| 1. Project Setup and Infrastructure | 1/2 | In progress | - |
 | 2. Data Pipeline and Model Initialization | 0/2 | Not started | - |
 | 3. Training Loop and Checkpoint Safety | 0/2 | Not started | - |
 | 4. Smoke Test and Full Training Run | 0/1 | Not started | - |
