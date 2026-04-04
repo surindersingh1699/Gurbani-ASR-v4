@@ -25,18 +25,18 @@ Requirements for Phase 1 training pipeline. Each maps to roadmap phases.
 
 ### Training
 
-- [ ] **TRAIN-01**: Discriminative learning rates -- encoder at 5e-5, decoder at 1e-4, proj_out at 1e-4
-- [ ] **TRAIN-02**: Gradient checkpointing enabled to fit in VRAM with reasonable batch sizes
-- [ ] **TRAIN-03**: bf16 mixed precision (preferred over fp16 on Ampere GPUs for better numerical stability)
-- [ ] **TRAIN-04**: 400 warmup steps to prevent early divergence
-- [ ] **TRAIN-05**: Training uses `max_steps` (not `num_train_epochs`) since streaming datasets have no length
-- [ ] **TRAIN-06**: `Seq2SeqTrainer` with `predict_with_generate=True` for autoregressive eval
-- [ ] **TRAIN-07**: WER computed via jiwer at each eval step (every 300 steps)
-- [ ] **TRAIN-08**: GPU auto-detection adjusts batch size and gradient accumulation automatically
+- [x] **TRAIN-01**: Discriminative learning rates -- encoder at 5e-5, decoder at 1e-4, proj_out at 1e-4
+- [x] **TRAIN-02**: Gradient checkpointing enabled to fit in VRAM with reasonable batch sizes
+- [x] **TRAIN-03**: bf16 mixed precision (preferred over fp16 on Ampere GPUs for better numerical stability)
+- [x] **TRAIN-04**: 400 warmup steps to prevent early divergence
+- [x] **TRAIN-05**: Training uses `max_steps` (not `num_train_epochs`) since streaming datasets have no length
+- [x] **TRAIN-06**: `Seq2SeqTrainer` with `predict_with_generate=True` for autoregressive eval
+- [x] **TRAIN-07**: WER computed via jiwer at each eval step (every 300 steps)
+- [x] **TRAIN-08**: GPU auto-detection adjusts batch size and gradient accumulation automatically
 
 ### Checkpoint Safety
 
-- [ ] **CKPT-01**: Checkpoints saved locally every 300 steps with `save_total_limit=3`
+- [x] **CKPT-01**: Checkpoints saved locally every 300 steps with `save_total_limit=3`
 - [ ] **CKPT-02**: Best checkpoint pushed to HuggingFace Hub after every evaluation via custom callback
 - [ ] **CKPT-03**: Training can resume from last checkpoint if spot instance is preempted
 - [ ] **CKPT-04**: Final trained model pushed to HuggingFace Hub as `surt_small_v1`
@@ -101,15 +101,15 @@ Which phases cover which requirements. Updated during roadmap creation.
 | MODEL-03 | Phase 2 | Complete |
 | MODEL-04 | Phase 2 | Complete |
 | MODEL-05 | Phase 2 | Complete |
-| TRAIN-01 | Phase 3 | Pending |
-| TRAIN-02 | Phase 3 | Pending |
-| TRAIN-03 | Phase 3 | Pending |
-| TRAIN-04 | Phase 3 | Pending |
-| TRAIN-05 | Phase 3 | Pending |
-| TRAIN-06 | Phase 3 | Pending |
-| TRAIN-07 | Phase 3 | Pending |
-| TRAIN-08 | Phase 3 | Pending |
-| CKPT-01 | Phase 3 | Pending |
+| TRAIN-01 | Phase 3 | Complete |
+| TRAIN-02 | Phase 3 | Complete |
+| TRAIN-03 | Phase 3 | Complete |
+| TRAIN-04 | Phase 3 | Complete |
+| TRAIN-05 | Phase 3 | Complete |
+| TRAIN-06 | Phase 3 | Complete |
+| TRAIN-07 | Phase 3 | Complete |
+| TRAIN-08 | Phase 3 | Complete |
+| CKPT-01 | Phase 3 | Complete |
 | CKPT-02 | Phase 3 | Pending |
 | CKPT-03 | Phase 3 | Pending |
 | CKPT-04 | Phase 4 | Pending |
