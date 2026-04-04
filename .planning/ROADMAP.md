@@ -44,11 +44,11 @@ Plans:
   3. A fixed 300-example validation subset is loaded into memory and produces identical examples across runs
   4. Labels are tokenized as Gurmukhi with pad tokens masked to -100 and no double BOS tokens
   5. `model.generate()` on a single audio sample produces Gurmukhi text (not English) with generation_max_length=448
-**Plans**: TBD
+**Plans**: 2 plans
 
 Plans:
-- [ ] 02-01: TBD
-- [ ] 02-02: TBD
+- [ ] 02-01-PLAN.md — Model and processor initialization with Gurmukhi language/task config
+- [ ] 02-02-PLAN.md — Streaming data pipeline with augmentation, validation subset, and data collator
 
 ### Phase 3: Training Loop and Checkpoint Safety
 **Goal**: The Seq2SeqTrainer is fully wired with discriminative learning rates, gradient checkpointing, bf16 precision, WER evaluation, and a checkpoint safety system that preserves progress to HuggingFace Hub every 300 steps
