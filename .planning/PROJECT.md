@@ -44,9 +44,9 @@ The model must accurately transcribe Gurbani audio in Gurmukhi script — this i
 
 ## Constraints
 
-- **Compute:** RunPod A40 (48GB VRAM) via SSH — Claude Code manages training unattended
-- **Cost target:** ~$18-27 (A40 at ~$1.50/hr for 12-18h depending on efficiency)
-- **Checkpoint safety:** Must push to HuggingFace incrementally — RunPod sessions can be interrupted
+- **Compute:** RunPod spot GPU (< $0.30/hr) via SSH — Claude Code manages training unattended. Spot instances can be preempted at any time.
+- **Cost target:** < $10 (spot GPU at < $0.30/hr for 12-18h depending on GPU assigned)
+- **Checkpoint safety:** Must push to HuggingFace incrementally — spot instances can be preempted without warning, making checkpoint safety critical
 - **No Colab dependency:** Everything must run as Python scripts (no notebook-only patterns)
 - **Dataset streaming:** Must stream from HuggingFace, not download to RunPod disk
 
@@ -55,7 +55,7 @@ The model must accurately transcribe Gurbani audio in Gurmukhi script — this i
 | Decision | Rationale | Outcome |
 |----------|-----------|---------|
 | Full fine-tuning (not LoRA/adapter) | Whisper has minimal Punjabi exposure; encoder needs deep adaptation to Gurbani acoustics | — Pending |
-| RunPod A40 over Colab Pro | Stable SSH session, no session limits, Claude Code can manage unattended | — Pending |
+| RunPod spot GPU over Colab Pro | Stable SSH session, no session limits, Claude Code can manage unattended, < $0.30/hr | — Pending |
 | Discriminative LR (encoder 5e-5, decoder 1e-4) | Encoder knows general audio; decoder learning Gurmukhi nearly from scratch needs higher LR | — Pending |
 | HuggingFace Hub as checkpoint store | Preserves progress across session restarts, accessible from any machine | — Pending |
 
