@@ -28,11 +28,11 @@ Decimal phases appear between their surrounding integers in numeric order.
   2. HuggingFace token is loaded from environment variable and `huggingface_hub.HfApi().whoami()` returns the correct user
   3. A tmux session persists across SSH disconnect and reconnect
   4. config.py correctly detects the GPU model and sets batch size and gradient accumulation accordingly
-**Plans**: TBD
+**Plans**: 2 plans
 
 Plans:
-- [ ] 01-01: TBD
-- [ ] 01-02: TBD
+- [ ] 01-01-PLAN.md — Create surt/ package with config.py, requirements.txt, and setup_pod.sh
+- [ ] 01-02-PLAN.md — Validate infrastructure on live RunPod pod (checkpoint)
 
 ### Phase 2: Data Pipeline and Model Initialization
 **Goal**: The streaming data pipeline produces correctly preprocessed Gurmukhi training examples, and the model is initialized with the right language, task, and generation settings to prevent catastrophic misconfiguration
