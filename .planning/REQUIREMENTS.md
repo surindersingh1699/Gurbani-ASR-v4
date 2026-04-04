@@ -17,11 +17,11 @@ Requirements for Phase 1 training pipeline. Each maps to roadmap phases.
 
 ### Model Configuration
 
-- [ ] **MODEL-01**: Base model is `openai/whisper-small` with full fine-tuning (encoder + decoder, not LoRA)
-- [ ] **MODEL-02**: Language set to `punjabi` and task set to `transcribe` on both processor AND `model.generation_config` (Whisper tokenizer stores the full language name internally, not the ISO code `pa`)
-- [ ] **MODEL-03**: `forced_decoder_ids` set to `None` to prevent forced token generation
-- [ ] **MODEL-04**: Mool Mantar used as `initial_prompt` during generation/eval for Gurmukhi vocabulary anchoring
-- [ ] **MODEL-05**: `generation_max_length` set to 448 to handle Gurmukhi tokenizer expansion (3-5x longer sequences than English)
+- [x] **MODEL-01**: Base model is `openai/whisper-small` with full fine-tuning (encoder + decoder, not LoRA)
+- [x] **MODEL-02**: Language set to `punjabi` and task set to `transcribe` on both processor AND `model.generation_config` (Whisper tokenizer stores the full language name internally, not the ISO code `pa`)
+- [x] **MODEL-03**: `forced_decoder_ids` set to `None` to prevent forced token generation
+- [x] **MODEL-04**: Mool Mantar used as `initial_prompt` during generation/eval for Gurmukhi vocabulary anchoring
+- [x] **MODEL-05**: `generation_max_length` set to 448 to handle Gurmukhi tokenizer expansion (3-5x longer sequences than English)
 
 ### Training
 
@@ -96,11 +96,11 @@ Which phases cover which requirements. Updated during roadmap creation.
 | DATA-03 | Phase 2 | Pending |
 | DATA-04 | Phase 2 | Pending |
 | DATA-05 | Phase 2 | Pending |
-| MODEL-01 | Phase 2 | Pending |
-| MODEL-02 | Phase 2 | Pending |
-| MODEL-03 | Phase 2 | Pending |
-| MODEL-04 | Phase 2 | Pending |
-| MODEL-05 | Phase 2 | Pending |
+| MODEL-01 | Phase 2 | Complete |
+| MODEL-02 | Phase 2 | Complete |
+| MODEL-03 | Phase 2 | Complete |
+| MODEL-04 | Phase 2 | Complete |
+| MODEL-05 | Phase 2 | Complete |
 | TRAIN-01 | Phase 3 | Pending |
 | TRAIN-02 | Phase 3 | Pending |
 | TRAIN-03 | Phase 3 | Pending |
