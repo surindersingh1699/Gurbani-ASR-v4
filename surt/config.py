@@ -7,11 +7,11 @@ GPU_NAME = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "cpu"
 # Adjust per_device_train_batch_size and gradient_accumulation_steps
 # to maintain this while fitting in VRAM
 if "A100" in GPU_NAME:
-    BATCH_SIZE = 16
-    GRAD_ACCUM = 2
+    BATCH_SIZE = 32
+    GRAD_ACCUM = 1
 elif "A40" in GPU_NAME:
-    BATCH_SIZE = 16
-    GRAD_ACCUM = 2
+    BATCH_SIZE = 32
+    GRAD_ACCUM = 1
 elif "4090" in GPU_NAME:
     BATCH_SIZE = 8
     GRAD_ACCUM = 4

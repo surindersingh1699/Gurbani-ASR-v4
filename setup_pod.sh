@@ -23,7 +23,7 @@ fi
 python -c "from huggingface_hub import HfApi; user = HfApi().whoami(); print(f'Logged in as: {user[\"name\"]}')"
 
 echo "=== Verifying GPU ==="
-python -c "import torch; print(f'GPU: {torch.cuda.get_device_name(0)}'); print(f'VRAM: {torch.cuda.get_device_properties(0).total_mem / 1e9:.1f} GB')"
+python -c "import torch; print(f'GPU: {torch.cuda.get_device_name(0)}'); print(f'VRAM: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB')"
 
 echo "=== Creating workspace directories ==="
 mkdir -p /workspace/surt/checkpoints /workspace/surt/logs
