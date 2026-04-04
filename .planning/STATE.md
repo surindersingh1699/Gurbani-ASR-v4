@@ -3,12 +3,12 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: in-progress
-last_updated: "2026-04-04T15:06:25Z"
+last_updated: "2026-04-04T15:16:42.783Z"
 progress:
   total_phases: 4
-  completed_phases: 2
+  completed_phases: 3
   total_plans: 6
-  completed_plans: 5
+  completed_plans: 6
 ---
 
 # Project State
@@ -18,23 +18,23 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-04)
 
 **Core value:** Accurately transcribe Gurbani audio in Gurmukhi script -- the foundation for all downstream Surt phases
-**Current focus:** Phase 3: Training Loop and Checkpoint Safety
+**Current focus:** Phase 4: Smoke Test and Full Run
 
 ## Current Position
 
-Phase: 3 of 4 (Training Loop and Checkpoint Safety)
-Plan: 1 of 2 in current phase -- COMPLETE
-Status: Plan 03-01 complete (SurtTrainer + training args), Plan 03-02 next (Hub callback + auto-resume)
-Last activity: 2026-04-04 -- Plan 03-01 complete: surt/train.py with SurtTrainer, compute_metrics, training args
+Phase: 3 of 4 -- COMPLETE (Training Loop and Checkpoint Safety)
+Plan: 2 of 2 in current phase -- COMPLETE
+Status: Phase 3 complete (all training loop components in surt/train.py), Phase 4 next (smoke test + full run)
+Last activity: 2026-04-04 -- Plan 03-02 complete: HubPushCallback, main() with auto-resume
 
-Progress: [████████░░] 83%
+Progress: [█████████░] 92%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 5
-- Average duration: ~6 min
-- Total execution time: ~0.48 hours
+- Total plans completed: 6
+- Average duration: ~5 min
+- Total execution time: ~0.53 hours
 
 **By Phase:**
 
@@ -42,10 +42,10 @@ Progress: [████████░░] 83%
 |-------|-------|-------|----------|
 | 1 | 2/2 | ~20 min | ~10 min |
 | 2 | 2/2 | ~6 min | ~3 min |
-| 3 | 1/2 | ~3 min | ~3 min |
+| 3 | 2/2 | ~6 min | ~3 min |
 
 **Recent Trend:**
-- Last 5 plans: 01-02, 02-01, 02-02, 03-01
+- Last 5 plans: 02-01, 02-02, 03-01, 03-02
 - Trend: accelerating
 
 *Updated after each plan completion*
@@ -67,6 +67,9 @@ Recent decisions affecting current work:
 - [03-01]: proj_out checked before decoder in parameter name matching to avoid misclassification
 - [03-01]: id(param) deduplication handles tied proj_out.weight / embed_tokens.weight -- prevents double gradient updates
 - [03-01]: jiwer direct (not evaluate.load) for WER computation simplicity
+- [03-02]: Deferred surt.data/surt.model imports into main() to avoid import-time audiomentations dependency
+- [03-02]: Synchronous Hub push (no run_as_future) -- eval every 300 steps so blocking time acceptable for v1
+- [03-02]: processing_class=processor.feature_extractor used instead of deprecated tokenizer= (transformers v5)
 
 ### Pending Todos
 
@@ -81,5 +84,5 @@ None yet.
 ## Session Continuity
 
 Last session: 2026-04-04
-Stopped at: Completed 03-01-PLAN.md (training loop core) -- Plan 03-02 next
+Stopped at: Completed 03-02-PLAN.md (Hub callback + auto-resume) -- Phase 3 complete, Phase 4 next
 Resume file: None

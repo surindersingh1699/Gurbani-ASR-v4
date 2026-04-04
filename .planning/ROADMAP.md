@@ -14,7 +14,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 
 - [x] **Phase 1: Project Setup and Infrastructure** - RunPod environment, project scaffolding, dependencies, and config module
 - [x] **Phase 2: Data Pipeline and Model Initialization** - Streaming data with augmentation, model with correct Gurmukhi generation config
-- [ ] **Phase 3: Training Loop and Checkpoint Safety** - Seq2SeqTrainer wiring, discriminative LR, Hub push callback, resume logic
+- [x] **Phase 3: Training Loop and Checkpoint Safety** - Seq2SeqTrainer wiring, discriminative LR, Hub push callback, resume logic
 - [ ] **Phase 4: Smoke Test and Full Training Run** - Pre-flight validation, 10-step smoke test, full run producing surt_small_v1
 
 ## Phase Details
@@ -47,8 +47,8 @@ Plans:
 **Plans**: 2 plans
 
 Plans:
-- [ ] 02-01-PLAN.md — Model and processor initialization with Gurmukhi language/task config
-- [ ] 02-02-PLAN.md — Streaming data pipeline with augmentation, validation subset, and data collator
+- [x] 02-01-PLAN.md — Model and processor initialization with Gurmukhi language/task config
+- [x] 02-02-PLAN.md — Streaming data pipeline with augmentation, validation subset, and data collator
 
 ### Phase 3: Training Loop and Checkpoint Safety
 **Goal**: The Seq2SeqTrainer is fully wired with discriminative learning rates, gradient checkpointing, bf16 precision, WER evaluation, and a checkpoint safety system that preserves progress to HuggingFace Hub every 300 steps
@@ -63,8 +63,8 @@ Plans:
 **Plans**: 2 plans
 
 Plans:
-- [ ] 03-01-PLAN.md — Training constants, SurtTrainer with discriminative LR, WER compute_metrics, Seq2SeqTrainingArguments
-- [ ] 03-02-PLAN.md — HubPushCallback with best_wer.json persistence, main() entry point with auto-resume
+- [x] 03-01-PLAN.md — Training constants, SurtTrainer with discriminative LR, WER compute_metrics, Seq2SeqTrainingArguments
+- [x] 03-02-PLAN.md — HubPushCallback with best_wer.json persistence, main() entry point with auto-resume
 
 ### Phase 4: Smoke Test and Full Training Run
 **Goal**: The pipeline is validated with pre-flight checks and a 10-step smoke test, then committed to a full training run that produces surt_small_v1 on HuggingFace Hub
@@ -88,6 +88,6 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Project Setup and Infrastructure | 2/2 | Complete | 2026-04-04 |
-| 2. Data Pipeline and Model Initialization | 0/2 | Not started | - |
-| 3. Training Loop and Checkpoint Safety | 0/2 | Not started | - |
+| 2. Data Pipeline and Model Initialization | 2/2 | Complete | 2026-04-04 |
+| 3. Training Loop and Checkpoint Safety | 2/2 | Complete | 2026-04-04 |
 | 4. Smoke Test and Full Training Run | 0/1 | Not started | - |

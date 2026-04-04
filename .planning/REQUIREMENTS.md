@@ -37,8 +37,8 @@ Requirements for Phase 1 training pipeline. Each maps to roadmap phases.
 ### Checkpoint Safety
 
 - [x] **CKPT-01**: Checkpoints saved locally every 300 steps with `save_total_limit=3`
-- [ ] **CKPT-02**: Best checkpoint pushed to HuggingFace Hub after every evaluation via custom callback
-- [ ] **CKPT-03**: Training can resume from last checkpoint if spot instance is preempted
+- [x] **CKPT-02**: Best checkpoint pushed to HuggingFace Hub after every evaluation via custom callback
+- [x] **CKPT-03**: Training can resume from last checkpoint if spot instance is preempted
 - [ ] **CKPT-04**: Final trained model pushed to HuggingFace Hub as `surt_small_v1`
 
 ### Infrastructure
@@ -110,8 +110,8 @@ Which phases cover which requirements. Updated during roadmap creation.
 | TRAIN-07 | Phase 3 | Complete |
 | TRAIN-08 | Phase 3 | Complete |
 | CKPT-01 | Phase 3 | Complete |
-| CKPT-02 | Phase 3 | Pending |
-| CKPT-03 | Phase 3 | Pending |
+| CKPT-02 | Phase 3 | Complete |
+| CKPT-03 | Phase 3 | Complete |
 | CKPT-04 | Phase 4 | Pending |
 | INFRA-01 | Phase 1 | Pending |
 | INFRA-02 | Phase 1 | Pending |
