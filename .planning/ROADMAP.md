@@ -12,7 +12,7 @@ This roadmap delivers `surt_small_v1` -- a Gurmukhi-specialized ASR model fine-t
 
 Decimal phases appear between their surrounding integers in numeric order.
 
-- [ ] **Phase 1: Project Setup and Infrastructure** - RunPod environment, project scaffolding, dependencies, and config module
+- [x] **Phase 1: Project Setup and Infrastructure** - RunPod environment, project scaffolding, dependencies, and config module
 - [ ] **Phase 2: Data Pipeline and Model Initialization** - Streaming data with augmentation, model with correct Gurmukhi generation config
 - [ ] **Phase 3: Training Loop and Checkpoint Safety** - Seq2SeqTrainer wiring, discriminative LR, Hub push callback, resume logic
 - [ ] **Phase 4: Smoke Test and Full Training Run** - Pre-flight validation, 10-step smoke test, full run producing surt_small_v1
@@ -32,7 +32,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 
 Plans:
 - [x] 01-01-PLAN.md — Create surt/ package with config.py, requirements.txt, and setup_pod.sh
-- [ ] 01-02-PLAN.md — Validate infrastructure on live RunPod pod (checkpoint)
+- [x] 01-02-PLAN.md — Validate infrastructure on live RunPod pod (checkpoint)
 
 ### Phase 2: Data Pipeline and Model Initialization
 **Goal**: The streaming data pipeline produces correctly preprocessed Gurmukhi training examples, and the model is initialized with the right language, task, and generation settings to prevent catastrophic misconfiguration
@@ -87,7 +87,7 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Project Setup and Infrastructure | 1/2 | In progress | - |
+| 1. Project Setup and Infrastructure | 2/2 | Complete | 2026-04-04 |
 | 2. Data Pipeline and Model Initialization | 0/2 | Not started | - |
 | 3. Training Loop and Checkpoint Safety | 0/2 | Not started | - |
 | 4. Smoke Test and Full Training Run | 0/1 | Not started | - |
