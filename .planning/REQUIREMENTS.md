@@ -18,7 +18,7 @@ Requirements for Phase 1 training pipeline. Each maps to roadmap phases.
 ### Model Configuration
 
 - [ ] **MODEL-01**: Base model is `openai/whisper-small` with full fine-tuning (encoder + decoder, not LoRA)
-- [ ] **MODEL-02**: Language set to `pa` and task set to `transcribe` on both processor AND `model.generation_config`
+- [ ] **MODEL-02**: Language set to `punjabi` and task set to `transcribe` on both processor AND `model.generation_config` (Whisper tokenizer stores the full language name internally, not the ISO code `pa`)
 - [ ] **MODEL-03**: `forced_decoder_ids` set to `None` to prevent forced token generation
 - [ ] **MODEL-04**: Mool Mantar used as `initial_prompt` during generation/eval for Gurmukhi vocabulary anchoring
 - [ ] **MODEL-05**: `generation_max_length` set to 448 to handle Gurmukhi tokenizer expansion (3-5x longer sequences than English)
