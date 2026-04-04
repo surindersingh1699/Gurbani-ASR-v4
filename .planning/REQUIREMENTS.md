@@ -1,7 +1,7 @@
-# Requirements: Surt Phase 1 — Fine-tune Whisper Small
+# Requirements: Surt Phase 1 -- Fine-tune Whisper Small
 
 **Defined:** 2026-04-04
-**Core Value:** Accurately transcribe Gurbani audio in Gurmukhi script — the foundation for all downstream phases
+**Core Value:** Accurately transcribe Gurbani audio in Gurmukhi script -- the foundation for all downstream phases
 
 ## v1 Requirements
 
@@ -25,7 +25,7 @@ Requirements for Phase 1 training pipeline. Each maps to roadmap phases.
 
 ### Training
 
-- [ ] **TRAIN-01**: Discriminative learning rates — encoder at 5e-5, decoder at 1e-4, proj_out at 1e-4
+- [ ] **TRAIN-01**: Discriminative learning rates -- encoder at 5e-5, decoder at 1e-4, proj_out at 1e-4
 - [ ] **TRAIN-02**: Gradient checkpointing enabled to fit in VRAM with reasonable batch sizes
 - [ ] **TRAIN-03**: bf16 mixed precision (preferred over fp16 on Ampere GPUs for better numerical stability)
 - [ ] **TRAIN-04**: 400 warmup steps to prevent early divergence
@@ -50,7 +50,7 @@ Requirements for Phase 1 training pipeline. Each maps to roadmap phases.
 
 ### Smoke Test
 
-- [ ] **TEST-01**: Pre-flight validation generates one sample before training starts — verifies Gurmukhi output (not English)
+- [ ] **TEST-01**: Pre-flight validation generates one sample before training starts -- verifies Gurmukhi output (not English)
 - [ ] **TEST-02**: Pre-flight checks one batch for correct sample rate (16kHz), -100 padding, single BOS token
 - [ ] **TEST-03**: 10-step mini training run verifies loss decreases and LR schedule is correct before committing to full run
 
@@ -78,7 +78,7 @@ Explicitly excluded. Documented to prevent scope creep.
 |---------|--------|
 | LoRA / QLoRA / Adapter fine-tuning | Whisper has 0.06% Punjabi exposure; low-rank updates cannot achieve the encoder adaptation needed |
 | Multi-GPU / DeepSpeed / FSDP | Single GPU with gradient accumulation is sufficient for 100h dataset |
-| Weights & Biases / MLflow | Single training run, no hyperparameter sweeps — console logging is sufficient |
+| Weights & Biases / MLflow | Single training run, no hyperparameter sweeps -- console logging is sufficient |
 | SpecAugment / spectrogram augmentation | Fragile with Whisper's feature extractor; waveform augmentation via audiomentations is better studied |
 | Custom tokenizer / extended vocabulary | Whisper's tokenizer already covers Gurmukhi Unicode; extending it destabilizes pretrained decoder weights |
 | Data quality filtering pipeline | Sehaj path is human-labeled gold data; quality filtering is a Phase 2/3 concern for silver data |
@@ -91,41 +91,41 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| DATA-01 | TBD | Pending |
-| DATA-02 | TBD | Pending |
-| DATA-03 | TBD | Pending |
-| DATA-04 | TBD | Pending |
-| DATA-05 | TBD | Pending |
-| MODEL-01 | TBD | Pending |
-| MODEL-02 | TBD | Pending |
-| MODEL-03 | TBD | Pending |
-| MODEL-04 | TBD | Pending |
-| MODEL-05 | TBD | Pending |
-| TRAIN-01 | TBD | Pending |
-| TRAIN-02 | TBD | Pending |
-| TRAIN-03 | TBD | Pending |
-| TRAIN-04 | TBD | Pending |
-| TRAIN-05 | TBD | Pending |
-| TRAIN-06 | TBD | Pending |
-| TRAIN-07 | TBD | Pending |
-| TRAIN-08 | TBD | Pending |
-| CKPT-01 | TBD | Pending |
-| CKPT-02 | TBD | Pending |
-| CKPT-03 | TBD | Pending |
-| CKPT-04 | TBD | Pending |
-| INFRA-01 | TBD | Pending |
-| INFRA-02 | TBD | Pending |
-| INFRA-03 | TBD | Pending |
-| INFRA-04 | TBD | Pending |
-| TEST-01 | TBD | Pending |
-| TEST-02 | TBD | Pending |
-| TEST-03 | TBD | Pending |
+| DATA-01 | Phase 2 | Pending |
+| DATA-02 | Phase 2 | Pending |
+| DATA-03 | Phase 2 | Pending |
+| DATA-04 | Phase 2 | Pending |
+| DATA-05 | Phase 2 | Pending |
+| MODEL-01 | Phase 2 | Pending |
+| MODEL-02 | Phase 2 | Pending |
+| MODEL-03 | Phase 2 | Pending |
+| MODEL-04 | Phase 2 | Pending |
+| MODEL-05 | Phase 2 | Pending |
+| TRAIN-01 | Phase 3 | Pending |
+| TRAIN-02 | Phase 3 | Pending |
+| TRAIN-03 | Phase 3 | Pending |
+| TRAIN-04 | Phase 3 | Pending |
+| TRAIN-05 | Phase 3 | Pending |
+| TRAIN-06 | Phase 3 | Pending |
+| TRAIN-07 | Phase 3 | Pending |
+| TRAIN-08 | Phase 3 | Pending |
+| CKPT-01 | Phase 3 | Pending |
+| CKPT-02 | Phase 3 | Pending |
+| CKPT-03 | Phase 3 | Pending |
+| CKPT-04 | Phase 4 | Pending |
+| INFRA-01 | Phase 1 | Pending |
+| INFRA-02 | Phase 1 | Pending |
+| INFRA-03 | Phase 1 | Pending |
+| INFRA-04 | Phase 1 | Pending |
+| TEST-01 | Phase 4 | Pending |
+| TEST-02 | Phase 4 | Pending |
+| TEST-03 | Phase 4 | Pending |
 
 **Coverage:**
 - v1 requirements: 29 total
-- Mapped to phases: 0
-- Unmapped: 29
+- Mapped to phases: 29
+- Unmapped: 0
 
 ---
 *Requirements defined: 2026-04-04*
-*Last updated: 2026-04-04 after initial definition*
+*Last updated: 2026-04-04 after roadmap creation*
