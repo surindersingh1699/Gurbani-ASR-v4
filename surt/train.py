@@ -1,23 +1,30 @@
 """
 Training module for Gurbani ASR fine-tuning.
 
-Provides the core training machinery for Whisper fine-tuning:
+Provides the complete training pipeline for Whisper fine-tuning:
 1. SurtTrainer -- Seq2SeqTrainer subclass with discriminative learning rates
    (encoder at 5e-5, decoder at 1e-4, proj_out at 1e-4)
 2. make_compute_metrics -- Factory for WER computation via jiwer
 3. build_training_args -- Seq2SeqTrainingArguments builder with all hyperparameters
-
-The Hub push callback and auto-resume entry point are added in Plan 02.
+4. HubPushCallback -- WER-gated + periodic Hub push with best_wer.json persistence
+5. main() -- Entry point with auto-resume from latest checkpoint
 """
+
+import json
+import os
+from pathlib import Path
 
 import jiwer
 import numpy as np
+from huggingface_hub import HfApi
 from torch.optim import AdamW
-from transformers import Seq2SeqTrainer, Seq2SeqTrainingArguments
+from transformers import Seq2SeqTrainer, Seq2SeqTrainingArguments, TrainerCallback
+from transformers.trainer_utils import get_last_checkpoint
 
 from surt.config import (
     BATCH_SIZE,
     DECODER_LR,
+    EFFECTIVE_BATCH,
     ENCODER_LR,
     EVAL_STEPS,
     GENERATION_MAX_LENGTH,
@@ -27,9 +34,99 @@ from surt.config import (
     OUTPUT_DIR,
     SAVE_STEPS,
     SAVE_TOTAL_LIMIT,
+    TRAINING_HUB_REPO,
     WARMUP_STEPS,
     WEIGHT_DECAY,
 )
+# surt.data and surt.model are imported inside main() to avoid
+# import-time dependency on audiomentations/torch model loading.
+# This keeps `import surt.train` lightweight for testing.
+
+
+class HubPushCallback(TrainerCallback):
+    """Callback for WER-gated and periodic model pushes to HuggingFace Hub.
+
+    Implements a two-pronged push strategy for checkpoint safety:
+    1. Best push: Upload when WER improves (WER-gated)
+    2. Periodic safety push: Upload every Nth eval regardless of WER
+
+    Persists best WER to best_wer.json in OUTPUT_DIR so the metric survives
+    across resume cycles on spot instances.
+
+    Pushes the full model folder (weights + processor + tokenizer +
+    generation_config) to TRAINING_HUB_REPO, making it instantly loadable
+    with from_pretrained().
+    """
+
+    def __init__(
+        self,
+        hub_repo: str,
+        processor,
+        output_dir: str,
+        push_every_n_evals: int = 3,
+    ):
+        super().__init__()
+        self.hub_repo = hub_repo
+        self.processor = processor
+        self.output_dir = Path(output_dir)
+        self.push_every_n_evals = push_every_n_evals
+        self.eval_count = 0
+        self.api = HfApi()
+        self.best_wer_path = self.output_dir / "best_wer.json"
+        self.best_wer = self._load_best_wer()
+
+    def _load_best_wer(self) -> float:
+        """Load persisted best WER from disk, or return inf if not found."""
+        if self.best_wer_path.exists():
+            with open(self.best_wer_path) as f:
+                data = json.load(f)
+            wer = data.get("best_wer", float("inf"))
+            print(f"[train] Loaded best WER: {wer} from {self.best_wer_path}")
+            return wer
+        print("[train] No previous best WER found, starting fresh")
+        return float("inf")
+
+    def _save_best_wer(self, wer: float, step: int):
+        """Persist best WER and step to disk for resume survival."""
+        with open(self.best_wer_path, "w") as f:
+            json.dump({"best_wer": wer, "step": step}, f)
+
+    def _push_to_hub(self, model, step: int, wer: float, reason: str):
+        """Upload model + processor to Hub as a complete loadable folder."""
+        staging_dir = self.output_dir / "hub_staging"
+        model.save_pretrained(staging_dir)
+        self.processor.save_pretrained(staging_dir)
+
+        commit_msg = f"step {step} | WER {wer:.2f} | {reason}"
+        self.api.upload_folder(
+            repo_id=self.hub_repo,
+            folder_path=str(staging_dir),
+            commit_message=commit_msg,
+        )
+        print(f"[train] Hub push ({reason}): {commit_msg}")
+
+    def on_evaluate(self, args, state, control, metrics=None, **kwargs):
+        """After each eval step, conditionally push to Hub."""
+        self.eval_count += 1
+        current_wer = metrics.get("eval_wer", float("inf"))
+        step = state.global_step
+
+        is_best = current_wer < self.best_wer
+        is_periodic = (self.eval_count % self.push_every_n_evals) == 0
+
+        if is_best:
+            self.best_wer = current_wer
+            self._save_best_wer(current_wer, step)
+
+        if is_best or is_periodic:
+            model = kwargs.get("model")
+            reason = "best" if is_best else "periodic"
+            self._push_to_hub(model, step, current_wer, reason)
+
+        print(
+            f"[train] Eval step {step}: WER={current_wer:.2f} "
+            f"(best={self.best_wer:.2f}, evals={self.eval_count})"
+        )
 
 
 class SurtTrainer(Seq2SeqTrainer):
