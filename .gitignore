@@ -38,6 +38,11 @@ models/
 outputs/
 wandb/
 
+# FAISS indexes (large binary artifacts)
+index/
+*.faiss
+*.pkl
+
 # Jupyter
 .ipynb_checkpoints/
 
