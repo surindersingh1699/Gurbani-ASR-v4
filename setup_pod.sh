@@ -2,6 +2,9 @@
 # setup_pod.sh -- Run once after SSH into a fresh RunPod pod
 set -euo pipefail
 
+# Ensure conda bin is on PATH (RunPod uses /opt/conda)
+export PATH="/opt/conda/bin:$PATH"
+
 echo "=== Installing system dependencies ==="
 apt-get update && apt-get install -y tmux libsndfile1
 
