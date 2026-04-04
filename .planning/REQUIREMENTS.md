@@ -9,11 +9,11 @@ Requirements for Phase 1 training pipeline. Each maps to roadmap phases.
 
 ### Data Pipeline
 
-- [ ] **DATA-01**: Training dataset streams from HuggingFace Hub with no local disk copy required
-- [ ] **DATA-02**: Audio is resampled to 16kHz via `cast_column("audio", Audio(sampling_rate=16000))`
-- [ ] **DATA-03**: Waveform augmentation applied to training data only (Gaussian noise p=0.4, room simulation p=0.3, time stretch p=0.2, pitch shift p=0.2)
-- [ ] **DATA-04**: Fixed 300-example validation subset loaded eagerly into memory for reproducible WER tracking
-- [ ] **DATA-05**: Labels tokenized as Gurmukhi with pad tokens masked to -100
+- [x] **DATA-01**: Training dataset streams from HuggingFace Hub with no local disk copy required
+- [x] **DATA-02**: Audio is resampled to 16kHz via `cast_column("audio", Audio(sampling_rate=16000))`
+- [x] **DATA-03**: Waveform augmentation applied to training data only (Gaussian noise p=0.4, room simulation p=0.3, time stretch p=0.2, pitch shift p=0.2)
+- [x] **DATA-04**: Fixed 300-example validation subset loaded eagerly into memory for reproducible WER tracking
+- [x] **DATA-05**: Labels tokenized as Gurmukhi with pad tokens masked to -100
 
 ### Model Configuration
 
@@ -91,11 +91,11 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| DATA-01 | Phase 2 | Pending |
-| DATA-02 | Phase 2 | Pending |
-| DATA-03 | Phase 2 | Pending |
-| DATA-04 | Phase 2 | Pending |
-| DATA-05 | Phase 2 | Pending |
+| DATA-01 | Phase 2 | Complete |
+| DATA-02 | Phase 2 | Complete |
+| DATA-03 | Phase 2 | Complete |
+| DATA-04 | Phase 2 | Complete |
+| DATA-05 | Phase 2 | Complete |
 | MODEL-01 | Phase 2 | Complete |
 | MODEL-02 | Phase 2 | Complete |
 | MODEL-03 | Phase 2 | Complete |
