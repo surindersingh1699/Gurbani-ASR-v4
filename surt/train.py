@@ -278,3 +278,92 @@ def build_training_args() -> Seq2SeqTrainingArguments:
     )
 
     return args
+
+
+def main():
+    """Entry point for the Surt training pipeline.
+
+    Wires together all components: model, data, trainer, Hub callback, and
+    training args. Automatically resumes from the latest checkpoint if
+    OUTPUT_DIR contains any -- no flag needed, just re-run the script.
+
+    Usage:
+        python -m surt.train
+        python surt/train.py
+    """
+    # Deferred imports -- these pull in heavy dependencies (audiomentations,
+    # model weights) that are only needed at training time.
+    from surt.config import DATASET_NAME
+    from surt.data import (
+        DataCollatorSpeechSeq2SeqWithPadding,
+        get_train_dataset,
+        get_val_dataset,
+    )
+    from surt.model import load_model_and_processor
+
+    # Step 1: Startup banner
+    print("[train] === Surt Training Pipeline ===")
+    print(f"[train] Output: {OUTPUT_DIR}")
+    print(f"[train] Hub repo: {TRAINING_HUB_REPO}")
+
+    # Step 2: Ensure output directory exists
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+    # Step 3: Auto-resume detection (CKPT-03)
+    # If OUTPUT_DIR contains checkpoints, resume from the latest automatically.
+    # No flag needed -- trust the checkpoint, no compatibility verification.
+    last_ckpt = get_last_checkpoint(OUTPUT_DIR)
+    if last_ckpt:
+        print(f"[train] Resuming from checkpoint: {last_ckpt}")
+    else:
+        print("[train] Starting fresh training run")
+
+    # Step 4: Load model and processor
+    model, processor = load_model_and_processor()
+
+    # Step 5: Load datasets
+    train_dataset = get_train_dataset(DATASET_NAME, processor)
+    val_dataset = get_val_dataset(DATASET_NAME, processor)
+
+    # Step 6: Create data collator
+    data_collator = DataCollatorSpeechSeq2SeqWithPadding(
+        processor=processor,
+        decoder_start_token_id=model.config.decoder_start_token_id,
+    )
+
+    # Step 7: Build training args
+    training_args = build_training_args()
+
+    # Step 8: Create Hub push callback
+    hub_callback = HubPushCallback(
+        hub_repo=TRAINING_HUB_REPO,
+        processor=processor,
+        output_dir=OUTPUT_DIR,
+        push_every_n_evals=3,
+    )
+
+    # Step 9: Create trainer
+    trainer = SurtTrainer(
+        model=model,
+        args=training_args,
+        train_dataset=train_dataset,
+        eval_dataset=val_dataset,
+        data_collator=data_collator,
+        compute_metrics=make_compute_metrics(processor),
+        processing_class=processor.feature_extractor,  # v5: processing_class, not tokenizer
+        callbacks=[hub_callback],
+    )
+
+    # Step 10: Train with auto-resume
+    # Epoch estimation: ~{MAX_STEPS * EFFECTIVE_BATCH / 64000} effective epochs
+    print(
+        f"[train] Starting training for {MAX_STEPS} steps "
+        f"(~{MAX_STEPS * EFFECTIVE_BATCH / 64000:.1f} effective epochs "
+        f"over ~64k examples)"
+    )
+    trainer.train(resume_from_checkpoint=last_ckpt)
+    print("[train] Training complete!")
+
+
+if __name__ == "__main__":
+    main()
