@@ -13,7 +13,7 @@ This roadmap delivers `surt_small_v1` -- a Gurmukhi-specialized ASR model fine-t
 Decimal phases appear between their surrounding integers in numeric order.
 
 - [x] **Phase 1: Project Setup and Infrastructure** - RunPod environment, project scaffolding, dependencies, and config module
-- [ ] **Phase 2: Data Pipeline and Model Initialization** - Streaming data with augmentation, model with correct Gurmukhi generation config
+- [x] **Phase 2: Data Pipeline and Model Initialization** - Streaming data with augmentation, model with correct Gurmukhi generation config
 - [ ] **Phase 3: Training Loop and Checkpoint Safety** - Seq2SeqTrainer wiring, discriminative LR, Hub push callback, resume logic
 - [ ] **Phase 4: Smoke Test and Full Training Run** - Pre-flight validation, 10-step smoke test, full run producing surt_small_v1
 
