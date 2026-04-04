@@ -3,15 +3,15 @@ import torch
 # --- GPU detection ---
 GPU_NAME = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "cpu"
 
-# Target effective batch size = 32
+# Target effective batch size = 64
 # Adjust per_device_train_batch_size and gradient_accumulation_steps
 # to maintain this while fitting in VRAM
 if "A100" in GPU_NAME:
     BATCH_SIZE = 32
-    GRAD_ACCUM = 1
+    GRAD_ACCUM = 2
 elif "A40" in GPU_NAME:
     BATCH_SIZE = 32
-    GRAD_ACCUM = 1
+    GRAD_ACCUM = 2
 elif "4090" in GPU_NAME:
     BATCH_SIZE = 8
     GRAD_ACCUM = 4
@@ -54,6 +54,14 @@ GENERATION_MAX_LENGTH = 448  # Gurmukhi tokenizer expansion: 3-5x longer than En
 
 # --- Mool Mantar (Gurmukhi vocabulary anchor for initial_prompt) ---
 MOOL_MANTAR = "ੴ ਸਤਿ ਨਾਮੁ ਕਰਤਾ ਪੁਰਖੁ ਨਿਰਭਉ ਨਿਰਵੈਰੁ ਅਕਾਲ ਮੂਰਤਿ ਅਜੂਨੀ ਸੈਭੰ ਗੁਰ ਪ੍ਰਸਾਦਿ"
+
+# --- Dataset ---
+DATASET_NAME = "surindersinghssj/gurbani-asr"
+TRAIN_SPLIT = "train"
+VAL_SPLIT = "train"        # Dataset has only train split; validation taken from train
+TEXT_COLUMN = "transcription"  # Column name for transcription text in Gurbani ASR dataset
+VAL_SIZE = 300             # Number of validation examples to materialize eagerly
+SHUFFLE_BUFFER = 500       # Buffer size for streaming shuffle
 
 print(f"[config] GPU: {GPU_NAME}")
 print(f"[config] Batch: {BATCH_SIZE} x Accum: {GRAD_ACCUM} = Effective: {EFFECTIVE_BATCH}")
