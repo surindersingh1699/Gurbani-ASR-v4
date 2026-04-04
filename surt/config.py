@@ -52,6 +52,16 @@ SAVE_TOTAL_LIMIT = 3
 WARMUP_STEPS = 400
 GENERATION_MAX_LENGTH = 448  # Gurmukhi tokenizer expansion: 3-5x longer than English
 
+# --- Training hyperparameters ---
+MAX_STEPS = 5000           # ~5 effective epochs over 64k rows with effective batch 64
+LEARNING_RATE = 1e-4       # Base LR for decoder and proj_out
+ENCODER_LR = 5e-5          # Encoder learns slower (transfer learning)
+DECODER_LR = 1e-4          # Decoder + proj_out at base LR
+WEIGHT_DECAY = 0.01        # Standard AdamW weight decay
+
+# --- Hub (training checkpoints) ---
+TRAINING_HUB_REPO = "surindersinghssj/surt-small-v1-training"
+
 # --- Mool Mantar (Gurmukhi vocabulary anchor for initial_prompt) ---
 MOOL_MANTAR = "ੴ ਸਤਿ ਨਾਮੁ ਕਰਤਾ ਪੁਰਖੁ ਨਿਰਭਉ ਨਿਰਵੈਰੁ ਅਕਾਲ ਮੂਰਤਿ ਅਜੂਨੀ ਸੈਭੰ ਗੁਰ ਪ੍ਰਸਾਦਿ"
 
@@ -65,3 +75,4 @@ SHUFFLE_BUFFER = 500       # Buffer size for streaming shuffle
 
 print(f"[config] GPU: {GPU_NAME}")
 print(f"[config] Batch: {BATCH_SIZE} x Accum: {GRAD_ACCUM} = Effective: {EFFECTIVE_BATCH}")
+print(f"[config] Max steps: {MAX_STEPS}, LR: encoder={ENCODER_LR}, decoder={DECODER_LR}")
