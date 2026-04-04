@@ -60,11 +60,11 @@ Plans:
   3. After an eval step, the best checkpoint folder appears on HuggingFace Hub with a commit message containing the step number and WER
   4. Simulating a restart and calling `trainer.train(resume_from_checkpoint=...)` resumes from the last local checkpoint without errors
   5. WER is computed via jiwer at each eval step (every 300 steps) using predict_with_generate
-**Plans**: TBD
+**Plans**: 2 plans
 
 Plans:
-- [ ] 03-01: TBD
-- [ ] 03-02: TBD
+- [ ] 03-01-PLAN.md — Training constants, SurtTrainer with discriminative LR, WER compute_metrics, Seq2SeqTrainingArguments
+- [ ] 03-02-PLAN.md — HubPushCallback with best_wer.json persistence, main() entry point with auto-resume
 
 ### Phase 4: Smoke Test and Full Training Run
 **Goal**: The pipeline is validated with pre-flight checks and a 10-step smoke test, then committed to a full training run that produces surt_small_v1 on HuggingFace Hub
