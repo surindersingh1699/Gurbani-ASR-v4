@@ -1,7 +1,10 @@
 transformers>=4.46
-datasets>=2.16
+datasets==2.21.0
 audiomentations>=0.42
+pyroomacoustics>=0.10
 jiwer>=4.0
 huggingface_hub>=0.20
 accelerate>=0.26
 evaluate>=0.4
+wandb>=0.17
+soundfile>=0.12

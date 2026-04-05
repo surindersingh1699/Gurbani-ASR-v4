@@ -27,7 +27,7 @@ from audiomentations import (
     RoomSimulator,
     TimeStretch,
 )
-from datasets import Audio, Dataset, IterableDataset, load_dataset
+from datasets import Audio, Dataset, IterableDataset, interleave_datasets, load_dataset
 
 from surt.config import SHUFFLE_BUFFER, VAL_SIZE, VAL_SPLIT
 
@@ -110,6 +110,8 @@ def get_train_dataset(
     processor: Any,
     split: str = "train",
     text_column: str = TEXT_COLUMN,
+    aux_dataset_name: str | None = None,
+    aux_probability: float = 0.15,
 ) -> IterableDataset:
     """Load streaming training dataset with waveform augmentation.
 
@@ -129,10 +131,6 @@ def get_train_dataset(
     Returns:
         Streaming IterableDataset yielding {"input_features", "labels"} dicts.
     """
-    ds = _load_dataset_with_retry(dataset_name, split=split, streaming=True)
-    ds = ds.cast_column(AUDIO_COLUMN, Audio(sampling_rate=16000))
-    ds = ds.shuffle(seed=42, buffer_size=SHUFFLE_BUFFER)
-
     def prepare_train(example: dict) -> dict:
         audio = example[AUDIO_COLUMN]
         samples = np.array(audio["array"], dtype=np.float32)
@@ -150,18 +148,41 @@ def get_train_dataset(
 
         return {"input_features": input_features, "labels": labels}
 
-    # Streaming IterableDataset may not have .column_names -- handle gracefully
-    try:
-        columns = ds.column_names
-    except (AttributeError, TypeError):
-        columns = None
+    def map_train_stream(ds: IterableDataset) -> IterableDataset:
+        ds = ds.cast_column(AUDIO_COLUMN, Audio(sampling_rate=16000))
+        ds = ds.shuffle(seed=42, buffer_size=SHUFFLE_BUFFER)
 
-    if columns:
-        ds = ds.map(prepare_train, remove_columns=columns)
+        # Streaming IterableDataset may not have .column_names -- handle gracefully
+        try:
+            columns = ds.column_names
+        except (AttributeError, TypeError):
+            columns = None
+
+        if columns:
+            return ds.map(prepare_train, remove_columns=columns)
+        return ds.map(prepare_train)
+
+    ds_primary = _load_dataset_with_retry(dataset_name, split=split, streaming=True)
+    ds_primary = map_train_stream(ds_primary)
+
+    ds = ds_primary
+    if aux_dataset_name and aux_probability > 0:
+        ds_aux = _load_dataset_with_retry(aux_dataset_name, split=split, streaming=True)
+        ds_aux = map_train_stream(ds_aux)
+        aux_p = min(max(aux_probability, 0.01), 0.99)
+        ds = interleave_datasets(
+            [ds_primary, ds_aux],
+            probabilities=[1.0 - aux_p, aux_p],
+            seed=42,
+            stopping_strategy="all_exhausted",
+        )
+        print(
+            f"[data] Training dataset stream mixed: primary={dataset_name}, "
+            f"aux={aux_dataset_name}, aux_probability={aux_p:.2f}"
+        )
     else:
-        ds = ds.map(prepare_train)
+        print(f"[data] Training dataset streaming from {dataset_name} (split={split})")
 
-    print(f"[data] Training dataset streaming from {dataset_name} (split={split})")
     return ds
 
 
@@ -192,7 +213,6 @@ def get_val_dataset(
     stream = _load_dataset_with_retry(dataset_name, split=split, streaming=True)
     stream = stream.cast_column(AUDIO_COLUMN, Audio(sampling_rate=16000))
 
-    # Take first val_size examples and materialize into list
     val_examples = list(stream.take(val_size))
 
     # Materialize into regular Dataset

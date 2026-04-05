@@ -20,6 +20,8 @@ pitfalls identified during research:
    transcription quality.
 """
 
+import os
+
 from transformers import WhisperForConditionalGeneration, WhisperProcessor
 
 from surt.config import BASE_MODEL, GENERATION_MAX_LENGTH, MOOL_MANTAR
@@ -32,15 +34,17 @@ def load_model_and_processor() -> tuple[WhisperForConditionalGeneration, Whisper
         Tuple of (model, processor) with language="punjabi", task="transcribe",
         forced_decoder_ids=None, and max_length=448 set on model.generation_config.
     """
+    model_id = os.environ.get("SURT_BASE_MODEL", BASE_MODEL)
+
     # Load processor with language and task
     processor = WhisperProcessor.from_pretrained(
-        BASE_MODEL,
+        model_id,
         language="punjabi",
         task="transcribe",
     )
 
     # Load model (full fine-tuning, no adapters)
-    model = WhisperForConditionalGeneration.from_pretrained(BASE_MODEL)
+    model = WhisperForConditionalGeneration.from_pretrained(model_id)
 
     # CRITICAL: Set language/task on model.generation_config, not just processor.
     # Without this, model.generate() ignores the processor settings and outputs English.
@@ -56,7 +60,7 @@ def load_model_and_processor() -> tuple[WhisperForConditionalGeneration, Whisper
     model.generation_config.max_length = GENERATION_MAX_LENGTH
 
     print(
-        f"[model] Loaded {BASE_MODEL} with language=punjabi, "
+        f"[model] Loaded {model_id} with language=punjabi, "
         f"task=transcribe, max_length={GENERATION_MAX_LENGTH}"
     )
 

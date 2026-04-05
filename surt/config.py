@@ -43,11 +43,11 @@ LOG_DIR = "/workspace/surt/logs"
 
 # --- Model ---
 BASE_MODEL = "openai/whisper-small"
-HF_MODEL_REPO = "surindersingh/surt-small-v1"
+HF_MODEL_REPO = "surindersinghssj/surt-small-v1"
 
 # --- Training constants ---
-EVAL_STEPS = 300
-SAVE_STEPS = 300
+EVAL_STEPS = 200
+SAVE_STEPS = 200
 SAVE_TOTAL_LIMIT = 3
 WARMUP_STEPS = 400
 GENERATION_MAX_LENGTH = 448  # Gurmukhi tokenizer expansion: 3-5x longer than English
@@ -67,12 +67,24 @@ MOOL_MANTAR = "ੴ ਸਤਿ ਨਾਮੁ ਕਰਤਾ ਪੁਰਖੁ ਨਿਰ
 
 # --- Dataset ---
 DATASET_NAME = "surindersinghssj/gurbani-asr"
+# Optional auxiliary kirtan-aligned dataset mixed into train stream.
+AUX_TRAIN_DATASET_NAME = "surindersinghssj/gurbani-asr-whisper-aligned"
+# Fraction of batches sampled from AUX_TRAIN_DATASET_NAME when enabled.
+AUX_TRAIN_PROBABILITY = 0.0
 TRAIN_SPLIT = "train"
-VAL_SPLIT = "train"        # Dataset has only train split; validation taken from train
+VAL_SPLIT = "validation"   # Proper split created by scripts/create_val_split.py
 TEXT_COLUMN = "transcription"  # Column name for transcription text in Gurbani ASR dataset
 VAL_SIZE = 300             # Number of validation examples to materialize eagerly
 SHUFFLE_BUFFER = 500       # Buffer size for streaming shuffle
 
+# --- Weights & Biases ---
+# Auto-enabled when WANDB_API_KEY is set in environment.
+# On RunPod: export WANDB_API_KEY="your-key" in ~/.bashrc
+WANDB_PROJECT = "surt-pilot"
+WANDB_ENTITY = "sabysurinder-surinder"
+
 print(f"[config] GPU: {GPU_NAME}")
 print(f"[config] Batch: {BATCH_SIZE} x Accum: {GRAD_ACCUM} = Effective: {EFFECTIVE_BATCH}")
 print(f"[config] Max steps: {MAX_STEPS}, LR: encoder={ENCODER_LR}, decoder={DECODER_LR}")
+print(f"[config] Train repo: {TRAINING_HUB_REPO}")
+print(f"[config] Final repo: {HF_MODEL_REPO}")
