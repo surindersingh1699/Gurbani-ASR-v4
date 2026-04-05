@@ -2,40 +2,32 @@ import torch
 
 # --- GPU detection ---
 GPU_NAME = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "cpu"
+NUM_GPUS = max(1, torch.cuda.device_count()) if torch.cuda.is_available() else 1
 
-# Target effective batch size = 64
-# Adjust per_device_train_batch_size and gradient_accumulation_steps
-# to maintain this while fitting in VRAM
+# Per-device batch size (VRAM-tuned per GPU type)
 if "A100" in GPU_NAME:
     BATCH_SIZE = 32
-    GRAD_ACCUM = 2
 elif "A40" in GPU_NAME:
     BATCH_SIZE = 32
-    GRAD_ACCUM = 2
 elif "4090" in GPU_NAME:
     BATCH_SIZE = 8
-    GRAD_ACCUM = 4
 elif "3090" in GPU_NAME:
     BATCH_SIZE = 8
-    GRAD_ACCUM = 4
 elif "A5000" in GPU_NAME:
     BATCH_SIZE = 8
-    GRAD_ACCUM = 4
 elif "L4" in GPU_NAME:
     BATCH_SIZE = 8
-    GRAD_ACCUM = 4
 elif "T4" in GPU_NAME:
     BATCH_SIZE = 4
-    GRAD_ACCUM = 8
 elif "V100" in GPU_NAME:
     BATCH_SIZE = 4
-    GRAD_ACCUM = 8
 else:
-    # Conservative fallback for unknown GPUs
     BATCH_SIZE = 4
-    GRAD_ACCUM = 8
 
-EFFECTIVE_BATCH = BATCH_SIZE * GRAD_ACCUM
+# Gradient accumulation: target ~64 effective batch, auto-adjusted for multi-GPU
+# effective_batch = BATCH_SIZE * GRAD_ACCUM * NUM_GPUS
+GRAD_ACCUM = max(1, 64 // (BATCH_SIZE * NUM_GPUS))
+EFFECTIVE_BATCH = BATCH_SIZE * GRAD_ACCUM * NUM_GPUS
 
 # --- Paths ---
 OUTPUT_DIR = "/workspace/surt/checkpoints"
@@ -45,15 +37,16 @@ LOG_DIR = "/workspace/surt/logs"
 BASE_MODEL = "openai/whisper-small"
 HF_MODEL_REPO = "surindersinghssj/surt-small-v1"
 
-# --- Training constants ---
+# --- Training schedule (auto-scaled for effective batch and GPU count) ---
+# Target: ~5 epochs over ~64k training examples
+_APPROX_TRAIN_SIZE = 64000
+_TARGET_EPOCHS = 5
+MAX_STEPS = (_APPROX_TRAIN_SIZE * _TARGET_EPOCHS) // EFFECTIVE_BATCH
+WARMUP_STEPS = max(100, MAX_STEPS // 12)  # ~8% warmup
 EVAL_STEPS = 200
 SAVE_STEPS = 200
 SAVE_TOTAL_LIMIT = 3
-WARMUP_STEPS = 400
 GENERATION_MAX_LENGTH = 448  # Gurmukhi tokenizer expansion: 3-5x longer than English
-
-# --- Training hyperparameters ---
-MAX_STEPS = 5000           # ~5 effective epochs over 64k rows with effective batch 64
 LEARNING_RATE = 1e-4       # Base LR for decoder and proj_out
 ENCODER_LR = 5e-5          # Encoder learns slower (transfer learning)
 DECODER_LR = 1e-4          # Decoder + proj_out at base LR
@@ -83,8 +76,8 @@ SHUFFLE_BUFFER = 500       # Buffer size for streaming shuffle
 WANDB_PROJECT = "surt-pilot"
 WANDB_ENTITY = "sabysurinder-surinder"
 
-print(f"[config] GPU: {GPU_NAME}")
-print(f"[config] Batch: {BATCH_SIZE} x Accum: {GRAD_ACCUM} = Effective: {EFFECTIVE_BATCH}")
-print(f"[config] Max steps: {MAX_STEPS}, LR: encoder={ENCODER_LR}, decoder={DECODER_LR}")
+print(f"[config] GPU: {GPU_NAME} x{NUM_GPUS}")
+print(f"[config] Batch: {BATCH_SIZE} x Accum: {GRAD_ACCUM} x GPUs: {NUM_GPUS} = Effective: {EFFECTIVE_BATCH}")
+print(f"[config] Max steps: {MAX_STEPS}, Warmup: {WARMUP_STEPS}, LR: encoder={ENCODER_LR}, decoder={DECODER_LR}")
 print(f"[config] Train repo: {TRAINING_HUB_REPO}")
 print(f"[config] Final repo: {HF_MODEL_REPO}")

@@ -101,17 +101,21 @@ class HubPushCallback(TrainerCallback):
 
     def _push_to_hub(self, model, step: int, wer: float, cer: float, reason: str):
         """Upload model + processor to Hub as a complete loadable folder."""
-        staging_dir = self.output_dir / "hub_staging"
-        model.save_pretrained(staging_dir)
-        self.processor.save_pretrained(staging_dir)
+        try:
+            staging_dir = self.output_dir / "hub_staging"
+            model.save_pretrained(staging_dir)
+            self.processor.save_pretrained(staging_dir)
 
-        commit_msg = f"step {step} | WER {wer:.2f} | CER {cer:.2f} | {reason}"
-        self.api.upload_folder(
-            repo_id=self.hub_repo,
-            folder_path=str(staging_dir),
-            commit_message=commit_msg,
-        )
-        print(f"[train] Hub push ({reason}): {commit_msg}")
+            commit_msg = f"step {step} | WER {wer:.2f} | CER {cer:.2f} | {reason}"
+            self.api.upload_folder(
+                repo_id=self.hub_repo,
+                folder_path=str(staging_dir),
+                commit_message=commit_msg,
+            )
+            print(f"[train] Hub push ({reason}): {commit_msg}")
+        except Exception as e:
+            print(f"[train] Hub push FAILED (non-fatal): {e}")
+            print("[train] Training continues — will retry on next eval")
 
     def on_evaluate(self, args, state, control, metrics=None, **kwargs):
         """After each eval step, conditionally push to Hub."""
@@ -333,6 +337,7 @@ def run_training_job(
     aux_probability: float = AUX_TRAIN_PROBABILITY,
     enable_wandb: bool = False,
     run_name: str | None = None,
+    streaming: bool = False,
 ):
     """Run one training job and return (trainer, processor)."""
     from surt.data import (
@@ -362,6 +367,7 @@ def run_training_job(
         processor,
         aux_dataset_name=aux_dataset_name,
         aux_probability=aux_probability,
+        streaming=streaming,
     )
     val_dataset = get_val_dataset(dataset_name, processor)
     data_collator = DataCollatorSpeechSeq2SeqWithPadding(
@@ -584,6 +590,7 @@ def main():
             aux_probability=AUX_TRAIN_PROBABILITY,
             enable_wandb=enable_wandb,
             run_name=f"surt-smoke-{datetime.datetime.utcnow().strftime('%Y%m%d-%H%M%S')}",
+            streaming=True,  # streaming for smoke (no need to load 64k for 10 steps)
         )
         validate_smoke_training(smoke_trainer, smoke_steps=smoke_steps)
         if args.mode == "smoke":

@@ -112,8 +112,13 @@ def get_train_dataset(
     text_column: str = TEXT_COLUMN,
     aux_dataset_name: str | None = None,
     aux_probability: float = 0.15,
-) -> IterableDataset:
-    """Load streaming training dataset with waveform augmentation.
+    streaming: bool = False,
+) -> IterableDataset | Dataset:
+    """Load training dataset with waveform augmentation.
+
+    Supports two modes:
+    - streaming=True: IterableDataset, low memory but slow resume
+    - streaming=False: In-memory Dataset, uses more RAM but instant resume
 
     Audio is resampled to 16kHz, augmented with noise/reverb/stretch/pitch,
     then converted to 80-bin log-Mel spectrograms. Text is tokenized to
@@ -127,9 +132,10 @@ def get_train_dataset(
         processor: WhisperProcessor with Punjabi tokenizer.
         split: Dataset split to load (default: "train").
         text_column: Name of the transcription text column.
+        streaming: If True, use streaming IterableDataset. If False, load in-memory.
 
     Returns:
-        Streaming IterableDataset yielding {"input_features", "labels"} dicts.
+        Dataset or IterableDataset yielding {"input_features", "labels"} dicts.
     """
     def prepare_train(example: dict) -> dict:
         audio = example[AUDIO_COLUMN]
@@ -148,41 +154,48 @@ def get_train_dataset(
 
         return {"input_features": input_features, "labels": labels}
 
-    def map_train_stream(ds: IterableDataset) -> IterableDataset:
-        ds = ds.cast_column(AUDIO_COLUMN, Audio(sampling_rate=16000))
-        ds = ds.shuffle(seed=42, buffer_size=SHUFFLE_BUFFER)
+    if streaming:
+        def map_train_stream(ds: IterableDataset) -> IterableDataset:
+            ds = ds.cast_column(AUDIO_COLUMN, Audio(sampling_rate=16000))
+            ds = ds.shuffle(seed=42, buffer_size=SHUFFLE_BUFFER)
+            try:
+                columns = ds.column_names
+            except (AttributeError, TypeError):
+                columns = None
+            if columns:
+                return ds.map(prepare_train, remove_columns=columns)
+            return ds.map(prepare_train)
 
-        # Streaming IterableDataset may not have .column_names -- handle gracefully
-        try:
-            columns = ds.column_names
-        except (AttributeError, TypeError):
-            columns = None
+        ds_primary = _load_dataset_with_retry(dataset_name, split=split, streaming=True)
+        ds_primary = map_train_stream(ds_primary)
 
-        if columns:
-            return ds.map(prepare_train, remove_columns=columns)
-        return ds.map(prepare_train)
+        ds = ds_primary
+        if aux_dataset_name and aux_probability > 0:
+            ds_aux = _load_dataset_with_retry(aux_dataset_name, split=split, streaming=True)
+            ds_aux = map_train_stream(ds_aux)
+            aux_p = min(max(aux_probability, 0.01), 0.99)
+            ds = interleave_datasets(
+                [ds_primary, ds_aux],
+                probabilities=[1.0 - aux_p, aux_p],
+                seed=42,
+                stopping_strategy="all_exhausted",
+            )
+            print(
+                f"[data] Training dataset stream mixed: primary={dataset_name}, "
+                f"aux={aux_dataset_name}, aux_probability={aux_p:.2f}"
+            )
+        else:
+            print(f"[data] Training dataset streaming from {dataset_name} (split={split})")
 
-    ds_primary = _load_dataset_with_retry(dataset_name, split=split, streaming=True)
-    ds_primary = map_train_stream(ds_primary)
+        return ds
 
-    ds = ds_primary
-    if aux_dataset_name and aux_probability > 0:
-        ds_aux = _load_dataset_with_retry(aux_dataset_name, split=split, streaming=True)
-        ds_aux = map_train_stream(ds_aux)
-        aux_p = min(max(aux_probability, 0.01), 0.99)
-        ds = interleave_datasets(
-            [ds_primary, ds_aux],
-            probabilities=[1.0 - aux_p, aux_p],
-            seed=42,
-            stopping_strategy="all_exhausted",
-        )
-        print(
-            f"[data] Training dataset stream mixed: primary={dataset_name}, "
-            f"aux={aux_dataset_name}, aux_probability={aux_p:.2f}"
-        )
-    else:
-        print(f"[data] Training dataset streaming from {dataset_name} (split={split})")
-
+    # In-memory mode: load full dataset, process with augmentation
+    print(f"[data] Loading training dataset in-memory from {dataset_name} (split={split})...")
+    ds = _load_dataset_with_retry(dataset_name, split=split, streaming=False)
+    ds = ds.cast_column(AUDIO_COLUMN, Audio(sampling_rate=16000))
+    ds = ds.map(prepare_train, remove_columns=ds.column_names, num_proc=4)
+    ds = ds.shuffle(seed=42)
+    print(f"[data] Training dataset: {len(ds)} examples loaded in memory")
     return ds
 
 
