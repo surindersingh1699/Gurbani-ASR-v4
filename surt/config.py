@@ -1,8 +1,18 @@
+import os
 import torch
 
 # --- GPU detection ---
-GPU_NAME = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "cpu"
-NUM_GPUS = max(1, torch.cuda.device_count()) if torch.cuda.is_available() else 1
+# SURT_NO_CUDA_INIT=1 skips all CUDA calls at import time so that data-prep
+# scripts (prepare_data.py) can safely use fork-based multiprocessing.
+# Training scripts never need to set this — GPU is auto-detected as usual.
+_skip_cuda = os.environ.get("SURT_NO_CUDA_INIT", "0") == "1"
+
+if _skip_cuda:
+    GPU_NAME = os.environ.get("SURT_GPU_TYPE", "A40")
+    NUM_GPUS = int(os.environ.get("SURT_NUM_GPUS", "1"))
+else:
+    GPU_NAME = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "cpu"
+    NUM_GPUS = max(1, torch.cuda.device_count()) if torch.cuda.is_available() else 1
 
 # Per-device batch size (VRAM-tuned per GPU type)
 if "A100" in GPU_NAME:
