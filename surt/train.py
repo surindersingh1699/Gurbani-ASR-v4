@@ -282,6 +282,7 @@ def build_training_args(
     logging_steps: int = 25,
     report_to: str | list[str] = "none",
     run_name: str | None = None,
+    dataloader_num_workers: int = 0,
 ) -> Seq2SeqTrainingArguments:
     """Build Seq2SeqTrainingArguments with all training hyperparameters.
 
@@ -318,7 +319,7 @@ def build_training_args(
         predict_with_generate=True,
         generation_max_length=GENERATION_MAX_LENGTH,
         logging_steps=logging_steps,
-        dataloader_num_workers=0,
+        dataloader_num_workers=dataloader_num_workers,
         load_best_model_at_end=False,
         push_to_hub=False,
         report_to=report_to,
@@ -396,6 +397,7 @@ def run_training_job(
         logging_steps=logging_steps,
         report_to=["wandb"] if enable_wandb else "none",
         run_name=run_name,
+        dataloader_num_workers=4 if not streaming else 0,
     )
 
     callbacks = []
@@ -687,7 +689,7 @@ def main():
             aux_probability=AUX_TRAIN_PROBABILITY,
             enable_wandb=enable_wandb,
             run_name=f"surt-full-{datetime.datetime.utcnow().strftime('%Y%m%d-%H%M%S')}",
-            streaming=True,
+            streaming=False,
         )
 
         if args.skip_final_push:
