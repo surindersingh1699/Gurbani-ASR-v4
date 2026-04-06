@@ -687,12 +687,19 @@ def main():
         if args.skip_final_push:
             print("[train] Final push skipped by flag")
         else:
-            push_final_model_to_hub(
-                full_trainer.model,
-                full_processor,
-                repo_id=HF_MODEL_REPO,
-                final_step=full_trainer.state.global_step,
-            )
+            try:
+                push_final_model_to_hub(
+                    full_trainer.model,
+                    full_processor,
+                    repo_id=HF_MODEL_REPO,
+                    final_step=full_trainer.state.global_step,
+                )
+            except Exception as e:
+                print(f"[train] Final push FAILED (non-fatal): {e}")
+                print(
+                    f"[train] Model is safe in {TRAINING_HUB_REPO} from callback pushes. "
+                    "You can push manually later."
+                )
 
         print("[train] Full training workflow complete")
 

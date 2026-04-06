@@ -113,7 +113,7 @@ def run_batch_preflight(
     if raw_sr != 16000:
         raise AssertionError(f"TEST-02 failed: expected 16kHz, got {raw_sr}")
 
-    train_dataset = get_train_dataset(dataset_name, processor)
+    train_dataset = get_train_dataset(dataset_name, processor, streaming=True)
     features = _take_n_examples(iter(train_dataset), 3)
 
     # Force variable label lengths to guarantee pad positions in the collated batch.

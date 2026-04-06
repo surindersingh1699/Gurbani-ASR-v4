@@ -28,6 +28,8 @@ echo "[launcher] Extra args: $*"
 MAX_RESTARTS=10
 RESTART_COUNT=0
 RESTART_DELAY=30  # seconds between restarts
+PREV_EXIT_CODE=""
+CONSECUTIVE_SAME=0
 
 while [ $RESTART_COUNT -lt $MAX_RESTARTS ]; do
     echo ""
@@ -52,6 +54,24 @@ while [ $RESTART_COUNT -lt $MAX_RESTARTS ]; do
     fi
 
     RESTART_COUNT=$((RESTART_COUNT + 1))
+
+    # Detect deterministic failures: if same exit code 3 times in a row,
+    # likely a corrupted checkpoint or code bug — retrying won't help.
+    if [ "$EXIT_CODE" = "$PREV_EXIT_CODE" ]; then
+        CONSECUTIVE_SAME=$((CONSECUTIVE_SAME + 1))
+    else
+        CONSECUTIVE_SAME=1
+    fi
+    PREV_EXIT_CODE=$EXIT_CODE
+
+    if [ $CONSECUTIVE_SAME -ge 3 ]; then
+        echo ""
+        echo "[launcher] ERROR: Same exit code ($EXIT_CODE) 3 times in a row."
+        echo "[launcher] Likely a deterministic error (corrupted checkpoint, code bug)."
+        echo "[launcher] Aborting to avoid burning GPU time."
+        exit 1
+    fi
+
     echo ""
     echo "[launcher] Training exited with code $EXIT_CODE"
     echo "[launcher] Restarting in ${RESTART_DELAY}s... ($RESTART_COUNT/$MAX_RESTARTS)"
