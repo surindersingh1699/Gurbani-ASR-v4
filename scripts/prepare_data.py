@@ -23,10 +23,10 @@ os.environ.setdefault("HF_HOME", "/workspace/.cache/huggingface")
 # Add repo root to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from surt.config import TRAIN_DATASET_NAME  # noqa: E402 – after sys.path fix
+from surt.config import DATASET_NAME  # noqa: E402 – after sys.path fix
 
 n_proc = int(os.environ.get("SURT_MAP_WORKERS", os.cpu_count() or 4))
-print(f"[prepare_data] Caching {TRAIN_DATASET_NAME} with {n_proc} workers...")
+print(f"[prepare_data] Caching {DATASET_NAME} with {n_proc} workers...")
 print(f"[prepare_data] Cache dir: {os.environ['HF_HOME']}/datasets/")
 
 t0 = time.time()
@@ -34,7 +34,7 @@ t0 = time.time()
 # Import here so torch (if transitively pulled in) is not yet CUDA-initialised
 from surt.data import get_train_dataset  # noqa: E402
 
-ds = get_train_dataset(TRAIN_DATASET_NAME)
+ds = get_train_dataset(DATASET_NAME)
 elapsed = time.time() - t0
 
 print(f"[prepare_data] Done: {len(ds)} examples in {elapsed/60:.1f} min")
