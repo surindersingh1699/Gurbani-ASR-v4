@@ -20,8 +20,14 @@ from pathlib import Path
 
 import jiwer
 import numpy as np
+import torch
 from huggingface_hub import HfApi
 from torch.optim import AdamW
+
+# Disable cuDNN — the bundled cuDNN 9.19 fails to initialize on some RunPod
+# images (CUDNN_STATUS_NOT_INITIALIZED). CUDA conv fallback is ~5% slower but
+# rock-solid. Safe to remove once the pod image ships a compatible cuDNN.
+torch.backends.cudnn.enabled = False
 from transformers import Seq2SeqTrainer, Seq2SeqTrainingArguments, TrainerCallback
 from transformers.trainer_utils import get_last_checkpoint
 
