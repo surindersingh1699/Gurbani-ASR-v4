@@ -397,7 +397,7 @@ def run_training_job(
         logging_steps=logging_steps,
         report_to=["wandb"] if enable_wandb else "none",
         run_name=run_name,
-        dataloader_num_workers=4 if not streaming else 0,
+        dataloader_num_workers=4,
     )
 
     callbacks = []
@@ -689,7 +689,7 @@ def main():
             aux_probability=AUX_TRAIN_PROBABILITY,
             enable_wandb=enable_wandb,
             run_name=f"surt-full-{datetime.datetime.utcnow().strftime('%Y%m%d-%H%M%S')}",
-            streaming=False,
+            streaming=True,
         )
 
         if args.skip_final_push:
