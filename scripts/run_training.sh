@@ -7,6 +7,7 @@
 set -euo pipefail
 
 export PATH=/opt/conda/bin:$PATH
+export HF_HOME=/workspace/.cache/huggingface
 
 # Load tokens from environment or .bashrc
 if [ -z "${HF_TOKEN:-}" ]; then
