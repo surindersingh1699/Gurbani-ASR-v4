@@ -689,7 +689,7 @@ def main():
             aux_probability=AUX_TRAIN_PROBABILITY,
             enable_wandb=enable_wandb,
             run_name=f"surt-full-{datetime.datetime.utcnow().strftime('%Y%m%d-%H%M%S')}",
-            streaming=True,
+            streaming=False,
         )
 
         if args.skip_final_push:

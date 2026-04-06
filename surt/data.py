@@ -202,9 +202,10 @@ def get_train_dataset(
     print(f"[data] Loading training dataset in-memory from {dataset_name} (split={split})...")
     ds = _load_dataset_with_retry(dataset_name, split=split, streaming=False)
     ds = ds.cast_column(AUDIO_COLUMN, Audio(sampling_rate=16000))
-    ds = ds.map(prepare_train, remove_columns=ds.column_names, num_proc=4)
+    n_proc = int(os.environ.get("SURT_MAP_WORKERS", os.cpu_count() or 4))
+    ds = ds.map(prepare_train, remove_columns=ds.column_names, num_proc=n_proc)
     ds = ds.shuffle(seed=42)
-    print(f"[data] Training dataset: {len(ds)} examples loaded in memory")
+    print(f"[data] Training dataset: {len(ds)} examples loaded in memory (num_proc={n_proc})")
     return ds
 
 
