@@ -54,6 +54,8 @@ Requirements for Phase 1 training pipeline. Each maps to roadmap phases.
 - [ ] **TEST-02**: Pre-flight checks one batch for correct sample rate (16kHz), -100 padding, single BOS token
 - [ ] **TEST-03**: 10-step mini training run verifies loss decreases and LR schedule is correct before committing to full run
 
+Implementation note: TEST-01/02/03 code paths are implemented in `surt/smoke_test.py` and `surt/train.py`; live runtime verification on RunPod is still pending.
+
 ## v2 Requirements
 
 Deferred to future phases. Tracked but not in current roadmap.
@@ -112,14 +114,14 @@ Which phases cover which requirements. Updated during roadmap creation.
 | CKPT-01 | Phase 3 | Complete |
 | CKPT-02 | Phase 3 | Complete |
 | CKPT-03 | Phase 3 | Complete |
-| CKPT-04 | Phase 4 | Pending |
+| CKPT-04 | Phase 4 | Implemented (runtime pending) |
 | INFRA-01 | Phase 1 | Pending |
 | INFRA-02 | Phase 1 | Pending |
 | INFRA-03 | Phase 1 | Pending |
 | INFRA-04 | Phase 1 | Pending |
-| TEST-01 | Phase 4 | Pending |
-| TEST-02 | Phase 4 | Pending |
-| TEST-03 | Phase 4 | Pending |
+| TEST-01 | Phase 4 | Implemented (runtime pending) |
+| TEST-02 | Phase 4 | Implemented (runtime pending) |
+| TEST-03 | Phase 4 | Implemented (runtime pending) |
 
 **Coverage:**
 - v1 requirements: 29 total

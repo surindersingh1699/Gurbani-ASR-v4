@@ -118,7 +118,14 @@ class HubPushCallback(TrainerCallback):
             print("[train] Training continues — will retry on next eval")
 
     def on_evaluate(self, args, state, control, metrics=None, **kwargs):
-        """After each eval step, conditionally push to Hub."""
+        """After each eval step, conditionally push to Hub.
+
+        Only runs Hub pushes and file writes on rank 0 to prevent race
+        conditions in multi-GPU (DDP) training.
+        """
+        if not state.is_world_process_zero:
+            return
+
         self.eval_count += 1
         current_wer = metrics.get("eval_wer", float("inf"))
         current_cer = metrics.get("eval_cer", float("inf"))
@@ -626,6 +633,7 @@ def main():
             aux_probability=AUX_TRAIN_PROBABILITY,
             enable_wandb=enable_wandb,
             run_name=f"surt-pilot-{datetime.datetime.utcnow().strftime('%Y%m%d-%H%M%S')}",
+            streaming=True,
         )
         print(
             f"[train] Pilot complete at step {pilot_trainer.state.global_step} "
@@ -673,6 +681,7 @@ def main():
             aux_probability=AUX_TRAIN_PROBABILITY,
             enable_wandb=enable_wandb,
             run_name=f"surt-full-{datetime.datetime.utcnow().strftime('%Y%m%d-%H%M%S')}",
+            streaming=True,
         )
 
         if args.skip_final_push:

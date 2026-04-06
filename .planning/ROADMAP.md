@@ -75,10 +75,10 @@ Plans:
   2. Pre-flight batch check confirms 16kHz sample rate, -100 padding on pad tokens, and single BOS token in labels
   3. A 10-step mini training run shows decreasing loss and correct LR schedule (warmup increasing from 0)
   4. The full training run completes and the final model is accessible at the surt_small_v1 HuggingFace repo
-**Plans**: TBD
+**Plans**: 1 plan
 
 Plans:
-- [ ] 04-01: TBD
+- [x] 04-01-PLAN.md — Implement pre-flight checks, smoke-mode trainer path, Phase 4 CLI orchestration, and final model push hook
 
 ## Progress
 
@@ -90,4 +90,4 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4
 | 1. Project Setup and Infrastructure | 2/2 | Complete | 2026-04-04 |
 | 2. Data Pipeline and Model Initialization | 2/2 | Complete | 2026-04-04 |
 | 3. Training Loop and Checkpoint Safety | 2/2 | Complete | 2026-04-04 |
-| 4. Smoke Test and Full Training Run | 0/1 | Not started | - |
+| 4. Smoke Test and Full Training Run | 1/1 | Code complete, runtime validation pending | - |

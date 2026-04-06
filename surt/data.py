@@ -14,19 +14,24 @@ Critical design decisions:
 - HuggingFace dataset loading uses retry with exponential backoff for rate limit handling
 """
 
+import os
 import time
 from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
 import torch
-from audiomentations import (
-    AddGaussianNoise,
-    Compose,
-    PitchShift,
-    RoomSimulator,
-    TimeStretch,
-)
+try:
+    from audiomentations import (
+        AddGaussianNoise,
+        Compose,
+        PitchShift,
+        RoomSimulator,
+        TimeStretch,
+    )
+    _HAS_AUGMENT = True
+except ModuleNotFoundError:
+    _HAS_AUGMENT = False
 from datasets import Audio, Dataset, IterableDataset, interleave_datasets, load_dataset
 
 from surt.config import SHUFFLE_BUFFER, VAL_SIZE, VAL_SPLIT
@@ -42,12 +47,16 @@ TEXT_COLUMN = "transcription"
 #   - Room reverb at p=0.3: simulate different recording spaces
 #   - Time stretch at p=0.2: tempo variation without pitch change
 #   - Pitch shift at p=0.2: simulate slight speaker pitch variation
-augment = Compose([
-    AddGaussianNoise(min_amplitude=0.001, max_amplitude=0.015, p=0.4),
-    RoomSimulator(p=0.3),
-    TimeStretch(min_rate=0.8, max_rate=1.25, p=0.2),
-    PitchShift(min_semitones=-4, max_semitones=4, p=0.2),
-])
+if _HAS_AUGMENT:
+    augment = Compose([
+        AddGaussianNoise(min_amplitude=0.001, max_amplitude=0.015, p=0.4),
+        RoomSimulator(p=0.3),
+        TimeStretch(min_rate=0.8, max_rate=1.25, p=0.2),
+        PitchShift(min_semitones=-4, max_semitones=4, p=0.2),
+    ])
+else:
+    def augment(*, samples, sample_rate):  # type: ignore[override]
+        return samples
 
 # --- Retry configuration for HuggingFace Hub rate limits ---
 _HF_MAX_RETRIES = 5
@@ -223,6 +232,7 @@ def get_val_dataset(
         Regular Dataset with exactly `val_size` examples, each containing
         {"input_features", "labels"}.
     """
+    val_size = int(os.environ.get("SURT_VAL_SIZE", val_size))
     stream = _load_dataset_with_retry(dataset_name, split=split, streaming=True)
     stream = stream.cast_column(AUDIO_COLUMN, Audio(sampling_rate=16000))
 

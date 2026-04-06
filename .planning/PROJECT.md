@@ -38,7 +38,7 @@ The model must accurately transcribe Gurbani audio in Gurmukhi script — this i
 
 - **Base model:** `openai/whisper-small` — Whisper saw very little Punjabi (~0.06% of training data), so both encoder and decoder need significant adaptation
 - **Dataset:** 100h sehaj path FLAC on HuggingFace, line-level labeled with Gurmukhi text. Exact dataset path TBD (user will provide)
-- **Language:** Punjabi (Gurmukhi script) — `language="pa"`, `task="transcribe"`
+- **Language:** Punjabi (Gurmukhi script) — `language="punjabi"`, `task="transcribe"`
 - **Model lineage:** This produces `surt_small_v1`, which becomes the starting point for Phase 2 (forced alignment) and Phase 3 (curriculum fine-tuning)
 - **Training plan reference:** `surt_training_plan.md` in project root contains the full 6-phase Surt pipeline spec
 
@@ -58,6 +58,8 @@ The model must accurately transcribe Gurbani audio in Gurmukhi script — this i
 | RunPod spot GPU over Colab Pro | Stable SSH session, no session limits, Claude Code can manage unattended, < $0.30/hr | — Pending |
 | Discriminative LR (encoder 5e-5, decoder 1e-4) | Encoder knows general audio; decoder learning Gurmukhi nearly from scratch needs higher LR | — Pending |
 | HuggingFace Hub as checkpoint store | Preserves progress across session restarts, accessible from any machine | — Pending |
+| Separate pre-flight module (`surt/smoke_test.py`) | Keep TEST-01/02 checks reusable and independent from full training orchestration | Implemented in Phase 4 Plan 01 |
+| Separate smoke output directory and no Hub callback in smoke mode | Prevent smoke artifacts from polluting checkpoint history in training Hub repo | Implemented in Phase 4 Plan 01 |
 
 ---
-*Last updated: 2026-04-04 after initialization*
+*Last updated: 2026-04-04 after Phase 4 implementation pass*

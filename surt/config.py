@@ -73,7 +73,7 @@ SHUFFLE_BUFFER = 500       # Buffer size for streaming shuffle
 # --- Weights & Biases ---
 # Auto-enabled when WANDB_API_KEY is set in environment.
 # On RunPod: export WANDB_API_KEY="your-key" in ~/.bashrc
-WANDB_PROJECT = "surt-pilot"
+WANDB_PROJECT = "surt"
 WANDB_ENTITY = "sabysurinder-surinder"
 
 print(f"[config] GPU: {GPU_NAME} x{NUM_GPUS}")
