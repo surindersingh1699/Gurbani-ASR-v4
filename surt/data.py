@@ -198,13 +198,28 @@ def get_train_dataset(
 
         return ds
 
-    # In-memory mode: load full dataset, process with augmentation
+    # In-memory mode: download data once, apply augmentation on-the-fly each access.
+    # set_transform() runs prepare_train lazily every time the DataLoader fetches a
+    # batch, so each epoch sees freshly augmented waveforms — no frozen artifacts.
     print(f"[data] Loading training dataset in-memory from {dataset_name} (split={split})...")
     ds = _load_dataset_with_retry(dataset_name, split=split, streaming=False)
     ds = ds.cast_column(AUDIO_COLUMN, Audio(sampling_rate=16000))
-    ds = ds.map(prepare_train, remove_columns=ds.column_names, num_proc=4)
-    ds = ds.shuffle(seed=42)
-    print(f"[data] Training dataset: {len(ds)} examples loaded in memory")
+
+    def prepare_train_batch(examples: dict) -> dict:
+        result = {"input_features": [], "labels": []}
+        for audio, text in zip(examples[AUDIO_COLUMN], examples[text_column]):
+            samples = np.array(audio["array"], dtype=np.float32)
+            samples = augment(samples=samples, sample_rate=16000)
+            feats = processor.feature_extractor(
+                samples, sampling_rate=16000
+            ).input_features[0]
+            labels = processor.tokenizer(text).input_ids
+            result["input_features"].append(feats)
+            result["labels"].append(labels)
+        return result
+
+    ds.set_transform(prepare_train_batch)
+    print(f"[data] Training dataset: {len(ds)} examples with on-the-fly augmentation")
     return ds
 
 
