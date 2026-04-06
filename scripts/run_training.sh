@@ -20,6 +20,11 @@ fi
 cd /workspace/Gurbani-ASR-v4
 export PYTHONPATH=/workspace/Gurbani-ASR-v4:${PYTHONPATH:-}
 
+# Pre-cache training data using all CPU cores before CUDA is initialised.
+# On cache hit this completes in seconds; on first run ~20 min with 24 cores.
+echo "[launcher] Pre-caching training data (fork-safe, no CUDA)..."
+python scripts/prepare_data.py || { echo "[launcher] Data prep failed — aborting"; exit 1; }
+
 # Detect GPUs
 NUM_GPUS=$(python -c "import torch; print(torch.cuda.device_count())" 2>/dev/null || echo 1)
 echo "[launcher] Detected $NUM_GPUS GPU(s)"
