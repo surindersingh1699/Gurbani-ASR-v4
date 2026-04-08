@@ -469,7 +469,7 @@ def push_final_model_to_hub(model, processor, *, repo_id: str, final_step: int) 
     with tempfile.TemporaryDirectory(prefix="surt-final-") as staging_dir:
         model.save_pretrained(staging_dir)
         processor.save_pretrained(staging_dir)
-        commit_message = f"Phase 4 final - surt_small_v1 (step {final_step})"
+        commit_message = f"surt_small_v2 final (step {final_step})"
         api.upload_folder(
             repo_id=repo_id,
             folder_path=staging_dir,

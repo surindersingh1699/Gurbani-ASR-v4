@@ -45,35 +45,35 @@ LOG_DIR = "/workspace/surt/logs"
 
 # --- Model ---
 BASE_MODEL = "openai/whisper-small"
-HF_MODEL_REPO = "surindersinghssj/surt-small-v1"
+HF_MODEL_REPO = "surindersinghssj/surt-small-v2"
 
 # --- Training schedule (auto-scaled for effective batch and GPU count) ---
 # Target: ~5 epochs over ~64k training examples
 _APPROX_TRAIN_SIZE = 64000
 _TARGET_EPOCHS = 5
 MAX_STEPS = (_APPROX_TRAIN_SIZE * _TARGET_EPOCHS) // EFFECTIVE_BATCH
-WARMUP_STEPS = max(100, MAX_STEPS // 12)  # ~8% warmup
+WARMUP_STEPS = 150  # ~3% — warm start from v1, no cold ramp needed
 EVAL_STEPS = 200
 SAVE_STEPS = 200
 SAVE_TOTAL_LIMIT = 3
 GENERATION_MAX_LENGTH = 448  # Gurmukhi tokenizer expansion: 3-5x longer than English
-LEARNING_RATE = 1e-4       # Base LR for decoder and proj_out
-ENCODER_LR = 5e-5          # Encoder learns slower (transfer learning)
-DECODER_LR = 1e-4          # Decoder + proj_out at base LR
+LEARNING_RATE = 1e-5       # Base LR (matches decoder) — v2 warm start from v1
+ENCODER_LR = 4e-5          # Encoder adapts acoustics for kirtan (4x decoder LR)
+DECODER_LR = 1e-5          # Decoder preserves Gurbani vocab from v1
 WEIGHT_DECAY = 0.01        # Standard AdamW weight decay
 
 # --- Hub (training checkpoints) ---
-TRAINING_HUB_REPO = "surindersinghssj/surt-small-v1-training"
+TRAINING_HUB_REPO = "surindersinghssj/surt-small-v2-training"
 
 # --- Mool Mantar (Gurmukhi vocabulary anchor for initial_prompt) ---
 MOOL_MANTAR = "ੴ ਸਤਿ ਨਾਮੁ ਕਰਤਾ ਪੁਰਖੁ ਨਿਰਭਉ ਨਿਰਵੈਰੁ ਅਕਾਲ ਮੂਰਤਿ ਅਜੂਨੀ ਸੈਭੰ ਗੁਰ ਪ੍ਰਸਾਦਿ"
 
 # --- Dataset ---
 DATASET_NAME = "surindersinghssj/gurbani-asr"
-# Optional auxiliary kirtan-aligned dataset mixed into train stream.
-AUX_TRAIN_DATASET_NAME = "surindersinghssj/gurbani-asr-whisper-aligned"
-# Fraction of batches sampled from AUX_TRAIN_DATASET_NAME when enabled.
-AUX_TRAIN_PROBABILITY = 0.0
+# Auxiliary kirtan dataset interleaved into training stream (~4x oversample).
+AUX_TRAIN_DATASET_NAME = "surindersinghssj/gurbani-kirtan-v2-prepared"
+# Fraction of batches sampled from kirtan dataset (proportional=0.08, 4x oversample=0.35).
+AUX_TRAIN_PROBABILITY = 0.35
 TRAIN_SPLIT = "train"
 VAL_SPLIT = "validation"   # Proper split created by scripts/create_val_split.py
 TEXT_COLUMN = "transcription"  # Column name for transcription text in Gurbani ASR dataset

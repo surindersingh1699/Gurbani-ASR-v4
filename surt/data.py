@@ -15,12 +15,29 @@ Critical design decisions:
 """
 
 import os
+import re
 import time
 from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
 import torch
+
+
+def normalize_gurbani_text(text: str) -> str:
+    """Strip non-spoken structural markers from Gurbani text.
+
+    Removes double danda (॥), verse numbers (॥੧॥), and collapses whitespace.
+    These are visual markers never spoken aloud — removing them gives the model
+    a cleaner signal and prevents WER/CER inflation from misplaced markers.
+    """
+    # Remove verse numbers: ॥੧॥ ॥੨॥ ॥੧੨॥ etc.
+    text = re.sub(r'॥[੦-੯]+॥', '', text)
+    # Remove standalone double danda ॥
+    text = re.sub(r'॥', '', text)
+    # Collapse multiple spaces
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text
 try:
     from audiomentations import (
         AddGaussianNoise,
@@ -158,8 +175,9 @@ def get_train_dataset(
             samples, sampling_rate=16000
         ).input_features[0]
 
-        # Tokenize Gurmukhi text
-        labels = processor.tokenizer(example[text_column]).input_ids
+        # Tokenize Gurmukhi text (normalize to strip ॥ markers)
+        text = normalize_gurbani_text(example[text_column])
+        labels = processor.tokenizer(text).input_ids
 
         return {"input_features": input_features, "labels": labels}
 
@@ -213,6 +231,7 @@ def get_train_dataset(
             feats = processor.feature_extractor(
                 samples, sampling_rate=16000
             ).input_features[0]
+            text = normalize_gurbani_text(text)
             labels = processor.tokenizer(text).input_ids
             result["input_features"].append(feats)
             result["labels"].append(labels)
@@ -269,8 +288,9 @@ def get_val_dataset(
             audio["array"], sampling_rate=audio["sampling_rate"]
         ).input_features[0]
 
-        # Tokenize Gurmukhi text
-        labels = processor.tokenizer(example[text_column]).input_ids
+        # Tokenize Gurmukhi text (normalize to strip ॥ markers)
+        text = normalize_gurbani_text(example[text_column])
+        labels = processor.tokenizer(text).input_ids
 
         return {"input_features": input_features, "labels": labels}
 
