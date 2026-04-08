@@ -58,7 +58,7 @@ SAVE_STEPS = 200
 SAVE_TOTAL_LIMIT = 3
 GENERATION_MAX_LENGTH = 448  # Gurmukhi tokenizer expansion: 3-5x longer than English
 LEARNING_RATE = 1e-5       # Base LR (matches decoder) — v2 warm start from v1
-ENCODER_LR = 4e-5          # Encoder adapts acoustics for kirtan (4x decoder LR)
+ENCODER_LR = 5e-5          # Encoder adapts acoustics for kirtan (5x decoder LR)
 DECODER_LR = 1e-5          # Decoder preserves Gurbani vocab from v1
 WEIGHT_DECAY = 0.01        # Standard AdamW weight decay
 
@@ -72,8 +72,8 @@ MOOL_MANTAR = "ੴ ਸਤਿ ਨਾਮੁ ਕਰਤਾ ਪੁਰਖੁ ਨਿਰ
 DATASET_NAME = "surindersinghssj/gurbani-asr"
 # Auxiliary kirtan dataset interleaved into training stream (~4x oversample).
 AUX_TRAIN_DATASET_NAME = "surindersinghssj/gurbani-kirtan-dataset-v2"
-# Fraction of training data from kirtan dataset (supplement: 30% kirtan, 70% sehaj path).
-AUX_TRAIN_PROBABILITY = 0.30
+# Fraction of training data from kirtan dataset (supplement: 35% kirtan, 65% sehaj path).
+AUX_TRAIN_PROBABILITY = 0.35
 TRAIN_SPLIT = "train"
 VAL_SPLIT = "validation"   # Proper split created by scripts/create_val_split.py
 TEXT_COLUMN = "transcription"  # Column name for transcription text in Gurbani ASR dataset

@@ -734,7 +734,7 @@ def main():
             aux_probability=AUX_TRAIN_PROBABILITY,
             enable_wandb=enable_wandb,
             run_name=f"surt-full-{datetime.datetime.utcnow().strftime('%Y%m%d-%H%M%S')}",
-            streaming=True,  # streaming for interleave + fresh augmentation each pass
+            streaming=False,  # non-streaming: pre-cached data + num_workers=8 keeps GPU fed
         )
 
         if args.skip_final_push:
