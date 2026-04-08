@@ -129,21 +129,29 @@ class HubPushCallback(TrainerCallback):
         Only runs Hub pushes and file writes on rank 0 to prevent race
         conditions in multi-GPU (DDP) training.
 
-        Handles both single-dataset (eval_wer) and multi-dataset
-        (eval_sehaj_path_wer, eval_kirtan_wer) metric keys.
+        With multi-dataset eval (sehaj_path + kirtan), the Trainer calls
+        on_evaluate once per dataset. We only act on sehaj_path evals for
+        hub push / best-WER tracking, and log kirtan results separately.
         """
         if not state.is_world_process_zero:
             return
 
-        self.eval_count += 1
-
-        # Support both single-dataset and multi-dataset eval metric keys
-        current_wer = metrics.get("eval_sehaj_path_wer", metrics.get("eval_wer", float("inf")))
-        current_cer = metrics.get("eval_sehaj_path_cer", metrics.get("eval_cer", float("inf")))
-        kirtan_wer = metrics.get("eval_kirtan_wer", None)
-        kirtan_cer = metrics.get("eval_kirtan_cer", None)
         step = state.global_step
 
+        # Kirtan-only eval call — just log and return
+        kirtan_wer = metrics.get("eval_kirtan_wer")
+        if kirtan_wer is not None:
+            kirtan_cer = metrics.get("eval_kirtan_cer", float("inf"))
+            print(
+                f"[train] Eval step {step}: kirtan WER={kirtan_wer:.2f} CER={kirtan_cer:.2f}"
+            )
+            return
+
+        # Sehaj path eval — hub push and best-WER tracking
+        current_wer = metrics.get("eval_sehaj_path_wer", metrics.get("eval_wer", float("inf")))
+        current_cer = metrics.get("eval_sehaj_path_cer", metrics.get("eval_cer", float("inf")))
+
+        self.eval_count += 1
         is_best = current_wer < self.best_wer
         is_periodic = (self.eval_count % self.push_every_n_evals) == 0
 
@@ -156,13 +164,10 @@ class HubPushCallback(TrainerCallback):
             reason = "best" if is_best else "periodic"
             self._push_to_hub(model, step, current_wer, current_cer, reason)
 
-        msg = (
-            f"[train] Eval step {step}: sehaj_path WER={current_wer:.2f} CER={current_cer:.2f}"
+        print(
+            f"[train] Eval step {step}: sehaj_path WER={current_wer:.2f} CER={current_cer:.2f} "
+            f"(best_wer={self.best_wer:.2f}, evals={self.eval_count})"
         )
-        if kirtan_wer is not None:
-            msg += f" | kirtan WER={kirtan_wer:.2f} CER={kirtan_cer:.2f}"
-        msg += f" (best_wer={self.best_wer:.2f}, evals={self.eval_count})"
-        print(msg)
 
 
 class SurtTrainer(Seq2SeqTrainer):
