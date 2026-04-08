@@ -397,7 +397,7 @@ def run_training_job(
         logging_steps=logging_steps,
         report_to=["wandb"] if enable_wandb else "none",
         run_name=run_name,
-        dataloader_num_workers=0 if streaming else 4,
+        dataloader_num_workers=0 if streaming else 8,
     )
 
     callbacks = []
@@ -641,7 +641,7 @@ def main():
             aux_probability=AUX_TRAIN_PROBABILITY,
             enable_wandb=enable_wandb,
             run_name=f"surt-pilot-{datetime.datetime.utcnow().strftime('%Y%m%d-%H%M%S')}",
-            streaming=True,
+            streaming=False,  # non-streaming: pre-cached data + num_workers=4 keeps GPU fed
         )
         print(
             f"[train] Pilot complete at step {pilot_trainer.state.global_step} "
