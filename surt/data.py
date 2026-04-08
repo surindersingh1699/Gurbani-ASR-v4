@@ -198,19 +198,29 @@ def get_train_dataset(
 
         ds = ds_primary
         if aux_dataset_name and aux_probability > 0:
-            ds_aux = _load_dataset_with_retry(aux_dataset_name, split=split, streaming=True)
-            ds_aux = map_train_stream(ds_aux)
             aux_p = min(max(aux_probability, 0.01), 0.99)
-            ds = interleave_datasets(
-                [ds_primary, ds_aux],
-                probabilities=[1.0 - aux_p, aux_p],
-                seed=42,
-                stopping_strategy="all_exhausted",
-            )
-            print(
-                f"[data] Training dataset stream mixed: primary={dataset_name}, "
-                f"aux={aux_dataset_name}, aux_probability={aux_p:.2f}"
-            )
+            try:
+                ds_aux = _load_dataset_with_retry(aux_dataset_name, split=split, streaming=True)
+                # Kirtan dataset uses 'gurmukhi_text' instead of 'transcription'
+                ds_aux = ds_aux.rename_column("gurmukhi_text", text_column)
+                # Filter to ≤30s — longer segments degrade training quality
+                ds_aux = ds_aux.filter(lambda x: x.get("duration", 0) <= 30)
+                ds_aux = map_train_stream(ds_aux)
+                ds = interleave_datasets(
+                    [ds_primary, ds_aux],
+                    probabilities=[1.0 - aux_p, aux_p],
+                    seed=42,
+                    stopping_strategy="all_exhausted",
+                )
+                print(
+                    f"[data] Training dataset stream mixed: primary={dataset_name}, "
+                    f"aux={aux_dataset_name}, aux_probability={aux_p:.2f}"
+                )
+            except Exception as e:
+                print(
+                    f"[data] WARNING: aux dataset unavailable ({aux_dataset_name}): {e}. "
+                    "Continuing with primary dataset only."
+                )
         else:
             print(f"[data] Training dataset streaming from {dataset_name} (split={split})")
 
