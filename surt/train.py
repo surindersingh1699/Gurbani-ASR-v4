@@ -16,6 +16,7 @@ import datetime
 import json
 import os
 import tempfile
+import threading
 from pathlib import Path
 
 import jiwer
@@ -106,21 +107,39 @@ class HubPushCallback(TrainerCallback):
             json.dump({"best_wer": wer, "step": step}, f)
 
     def _push_to_hub(self, model, step: int, wer: float, cer: float, reason: str):
-        """Upload model + processor to Hub as a complete loadable folder."""
+        """Upload model + processor to Hub in a background thread.
+
+        Saves weights synchronously (fast, local I/O) then uploads
+        asynchronously so training is never blocked by slow Hub uploads.
+        """
         try:
-            staging_dir = self.output_dir / "hub_staging"
+            # Save locally (fast) — use step-specific dir to avoid races
+            staging_dir = self.output_dir / f"hub_staging_{step}"
             model.save_pretrained(staging_dir)
             self.processor.save_pretrained(staging_dir)
 
             commit_msg = f"step {step} | WER {wer:.2f} | CER {cer:.2f} | {reason}"
-            self.api.upload_folder(
-                repo_id=self.hub_repo,
-                folder_path=str(staging_dir),
-                commit_message=commit_msg,
-            )
-            print(f"[train] Hub push ({reason}): {commit_msg}")
+
+            def _upload():
+                try:
+                    self.api.upload_folder(
+                        repo_id=self.hub_repo,
+                        folder_path=str(staging_dir),
+                        commit_message=commit_msg,
+                    )
+                    print(f"[train] Hub push ({reason}): {commit_msg}")
+                except Exception as e:
+                    print(f"[train] Hub push FAILED (non-fatal): {e}")
+                finally:
+                    # Clean up staging dir after upload
+                    import shutil
+                    shutil.rmtree(staging_dir, ignore_errors=True)
+
+            t = threading.Thread(target=_upload, daemon=True)
+            t.start()
+            print(f"[train] Hub upload queued in background: step {step}")
         except Exception as e:
-            print(f"[train] Hub push FAILED (non-fatal): {e}")
+            print(f"[train] Hub save FAILED (non-fatal): {e}")
             print("[train] Training continues — will retry on next eval")
 
     def on_evaluate(self, args, state, control, metrics=None, **kwargs):
