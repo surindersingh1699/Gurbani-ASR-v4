@@ -182,36 +182,28 @@ def get_train_dataset(
         return {"input_features": input_features, "labels": labels}
 
     if streaming:
-        def map_train_stream(ds: IterableDataset) -> IterableDataset:
-            ds = ds.cast_column(AUDIO_COLUMN, Audio(sampling_rate=16000))
-            ds = ds.shuffle(seed=42, buffer_size=SHUFFLE_BUFFER)
-            try:
-                columns = ds.column_names
-            except (AttributeError, TypeError):
-                columns = None
-            if columns:
-                return ds.map(prepare_train, remove_columns=columns)
-            return ds.map(prepare_train)
-
+        # Load primary dataset (raw)
         ds_primary = _load_dataset_with_retry(dataset_name, split=split, streaming=True)
-        ds_primary = map_train_stream(ds_primary)
+        ds_primary = ds_primary.cast_column(AUDIO_COLUMN, Audio(sampling_rate=16000))
 
         ds = ds_primary
         if aux_dataset_name and aux_probability > 0:
             aux_p = min(max(aux_probability, 0.01), 0.99)
             try:
                 ds_aux = _load_dataset_with_retry(aux_dataset_name, split=split, streaming=True)
-                # cast_column MUST happen before filter/map — those ops lose features metadata
                 ds_aux = ds_aux.cast_column(AUDIO_COLUMN, Audio(sampling_rate=16000))
                 # Filter to ≤30s — longer segments degrade training quality
                 ds_aux = ds_aux.filter(lambda x: x.get("duration", 0) <= 30)
-                # Kirtan dataset uses 'gurmukhi_text' not 'transcription'
+                # Kirtan uses 'gurmukhi_text' — add 'transcription' column
                 _tc = text_column
                 ds_aux = ds_aux.map(lambda x: {_tc: x["gurmukhi_text"]})
-                ds_aux = ds_aux.shuffle(seed=42, buffer_size=SHUFFLE_BUFFER)
-                ds_aux = ds_aux.map(prepare_train)
+                # Select only the columns that primary has so schemas match for interleave
+                ds_aux = ds_aux.select_columns([AUDIO_COLUMN, text_column])
+                ds_primary_slim = ds_primary.select_columns([AUDIO_COLUMN, text_column])
+                # Interleave RAW datasets (before prepare_train) — interleave_datasets
+                # can't handle processed numpy arrays
                 ds = interleave_datasets(
-                    [ds_primary, ds_aux],
+                    [ds_primary_slim, ds_aux],
                     probabilities=[1.0 - aux_p, aux_p],
                     seed=42,
                     stopping_strategy="all_exhausted",
@@ -229,6 +221,10 @@ def get_train_dataset(
                 )
         else:
             print(f"[data] Training dataset streaming from {dataset_name} (split={split})")
+
+        # Apply shuffle + prepare_train to the (possibly interleaved) stream
+        ds = ds.shuffle(seed=42, buffer_size=SHUFFLE_BUFFER)
+        ds = ds.map(prepare_train)
 
         return ds
 
