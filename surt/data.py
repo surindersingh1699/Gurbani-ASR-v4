@@ -49,7 +49,7 @@ try:
     _HAS_AUGMENT = True
 except ModuleNotFoundError:
     _HAS_AUGMENT = False
-from datasets import Audio, Dataset, IterableDataset, interleave_datasets, load_dataset
+from datasets import Audio, Dataset, IterableDataset, concatenate_datasets, interleave_datasets, load_dataset
 
 from surt.config import SHUFFLE_BUFFER, VAL_SIZE, VAL_SPLIT
 
@@ -249,6 +249,52 @@ def get_train_dataset(
     print(f"[data] Loading training dataset in-memory from {dataset_name} (split={split})...")
     ds = _load_dataset_with_retry(dataset_name, split=split, streaming=False)
     ds = ds.cast_column(AUDIO_COLUMN, Audio(sampling_rate=16000))
+
+    # Mix in auxiliary (kirtan) dataset if provided
+    if aux_dataset_name and aux_probability > 0:
+        aux_p = min(max(aux_probability, 0.01), 0.99)
+        try:
+            print(f"[data] Loading aux dataset in-memory from {aux_dataset_name}...")
+            ds_aux = _load_dataset_with_retry(aux_dataset_name, split=split, streaming=False)
+            ds_aux = ds_aux.cast_column(AUDIO_COLUMN, Audio(sampling_rate=16000))
+            # Filter to ≤30s — longer segments degrade training quality
+            ds_aux = ds_aux.filter(lambda x: x.get("duration", 0) <= 30)
+            # Kirtan uses 'gurmukhi_text' — map to expected text column
+            _tc = text_column
+            ds_aux = ds_aux.map(lambda x: {_tc: x["gurmukhi_text"]})
+
+            # Harmonize columns: keep only audio + text_column
+            keep_cols = {AUDIO_COLUMN, text_column}
+            ds = ds.remove_columns([c for c in ds.column_names if c not in keep_cols])
+            ds_aux = ds_aux.remove_columns([c for c in ds_aux.column_names if c not in keep_cols])
+
+            # Oversample kirtan to hit target ratio
+            # target_aux_count = primary_n * p / (1-p)
+            primary_n = len(ds)
+            target_aux_count = int(primary_n * aux_p / (1.0 - aux_p))
+            repeats = target_aux_count // len(ds_aux)
+            remainder = target_aux_count % len(ds_aux)
+
+            aux_parts = [ds_aux] * repeats
+            if remainder > 0:
+                aux_parts.append(ds_aux.select(range(remainder)))
+            ds_aux_oversampled = concatenate_datasets(aux_parts)
+
+            ds = concatenate_datasets([ds, ds_aux_oversampled])
+            ds = ds.shuffle(seed=42)
+
+            print(
+                f"[data] Mixed training: primary={primary_n}, "
+                f"aux={len(ds_aux)}x{repeats}+{remainder}={len(ds_aux_oversampled)}, "
+                f"total={len(ds)}, target_aux_ratio={aux_p:.0%}"
+            )
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            print(
+                f"[data] WARNING: aux dataset unavailable ({aux_dataset_name}): {e}. "
+                "Continuing with primary dataset only."
+            )
 
     def prepare_train_batch(examples: dict) -> dict:
         result = {"input_features": [], "labels": []}
