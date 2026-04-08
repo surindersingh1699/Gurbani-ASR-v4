@@ -72,8 +72,8 @@ MOOL_MANTAR = "ੴ ਸਤਿ ਨਾਮੁ ਕਰਤਾ ਪੁਰਖੁ ਨਿਰ
 DATASET_NAME = "surindersinghssj/gurbani-asr"
 # Auxiliary kirtan dataset interleaved into training stream (~4x oversample).
 AUX_TRAIN_DATASET_NAME = "surindersinghssj/gurbani-kirtan-dataset-v2"
-# Fraction of training data from kirtan dataset (kirtan-focused: 65% kirtan, 35% sehaj path).
-AUX_TRAIN_PROBABILITY = 0.65
+# Fraction of training data from kirtan dataset (supplement: 30% kirtan, 70% sehaj path).
+AUX_TRAIN_PROBABILITY = 0.30
 TRAIN_SPLIT = "train"
 VAL_SPLIT = "validation"   # Proper split created by scripts/create_val_split.py
 TEXT_COLUMN = "transcription"  # Column name for transcription text in Gurbani ASR dataset
