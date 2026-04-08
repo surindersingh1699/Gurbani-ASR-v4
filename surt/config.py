@@ -16,9 +16,9 @@ else:
 
 # Per-device batch size (VRAM-tuned per GPU type)
 if "A100" in GPU_NAME:
-    BATCH_SIZE = 32
+    BATCH_SIZE = 64  # 80GB VRAM, no accum needed → 2x faster
 elif "A40" in GPU_NAME:
-    BATCH_SIZE = 32
+    BATCH_SIZE = 64  # 48GB VRAM, Whisper Small + bf16 + grad_checkpointing fits easily
 elif "4090" in GPU_NAME:
     BATCH_SIZE = 8
 elif "3090" in GPU_NAME:
@@ -71,7 +71,7 @@ MOOL_MANTAR = "ੴ ਸਤਿ ਨਾਮੁ ਕਰਤਾ ਪੁਰਖੁ ਨਿਰ
 # --- Dataset ---
 DATASET_NAME = "surindersinghssj/gurbani-asr"
 # Auxiliary kirtan dataset interleaved into training stream (~4x oversample).
-AUX_TRAIN_DATASET_NAME = "surindersinghssj/gurbani-kirtan-v2-prepared"
+AUX_TRAIN_DATASET_NAME = "surindersinghssj/gurbani-kirtan-dataset-v2"
 # Fraction of batches sampled from kirtan dataset (proportional=0.08, 4x oversample=0.35).
 AUX_TRAIN_PROBABILITY = 0.35
 TRAIN_SPLIT = "train"
