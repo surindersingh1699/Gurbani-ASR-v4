@@ -201,10 +201,12 @@ def get_train_dataset(
             aux_p = min(max(aux_probability, 0.01), 0.99)
             try:
                 ds_aux = _load_dataset_with_retry(aux_dataset_name, split=split, streaming=True)
-                # Kirtan dataset uses 'gurmukhi_text' instead of 'transcription'
-                ds_aux = ds_aux.rename_column("gurmukhi_text", text_column)
                 # Filter to ≤30s — longer segments degrade training quality
                 ds_aux = ds_aux.filter(lambda x: x.get("duration", 0) <= 30)
+                # Kirtan dataset uses 'gurmukhi_text' not 'transcription' —
+                # map to add the expected column before processing
+                _tc = text_column  # capture for lambda
+                ds_aux = ds_aux.map(lambda x: {_tc: x["gurmukhi_text"]})
                 ds_aux = map_train_stream(ds_aux)
                 ds = interleave_datasets(
                     [ds_primary, ds_aux],
