@@ -16,6 +16,9 @@ fi
 if [ -z "${WANDB_API_KEY:-}" ]; then
     export WANDB_API_KEY=$(grep WANDB_API_KEY /root/.bashrc 2>/dev/null | tail -1 | cut -d= -f2 | tr -d '"' | tr -d "'" || echo "")
 fi
+if [ -z "${SURT_BASE_MODEL:-}" ]; then
+    export SURT_BASE_MODEL=$(grep SURT_BASE_MODEL /root/.bashrc 2>/dev/null | tail -1 | cut -d= -f2 | tr -d '"' | tr -d "'" || echo "")
+fi
 
 cd /workspace/Gurbani-ASR-v4
 export PYTHONPATH=/workspace/Gurbani-ASR-v4:${PYTHONPATH:-}
