@@ -201,13 +201,15 @@ def get_train_dataset(
             aux_p = min(max(aux_probability, 0.01), 0.99)
             try:
                 ds_aux = _load_dataset_with_retry(aux_dataset_name, split=split, streaming=True)
+                # cast_column MUST happen before filter/map — those ops lose features metadata
+                ds_aux = ds_aux.cast_column(AUDIO_COLUMN, Audio(sampling_rate=16000))
                 # Filter to ≤30s — longer segments degrade training quality
                 ds_aux = ds_aux.filter(lambda x: x.get("duration", 0) <= 30)
-                # Kirtan dataset uses 'gurmukhi_text' not 'transcription' —
-                # map to add the expected column before processing
-                _tc = text_column  # capture for lambda
+                # Kirtan dataset uses 'gurmukhi_text' not 'transcription'
+                _tc = text_column
                 ds_aux = ds_aux.map(lambda x: {_tc: x["gurmukhi_text"]})
-                ds_aux = map_train_stream(ds_aux)
+                ds_aux = ds_aux.shuffle(seed=42, buffer_size=SHUFFLE_BUFFER)
+                ds_aux = ds_aux.map(prepare_train)
                 ds = interleave_datasets(
                     [ds_primary, ds_aux],
                     probabilities=[1.0 - aux_p, aux_p],
