@@ -182,9 +182,14 @@ def get_train_dataset(
         return {"input_features": input_features, "labels": labels}
 
     if streaming:
-        # Load primary dataset (raw)
+        def _process_stream(ds: IterableDataset) -> IterableDataset:
+            """Cast audio, shuffle, and apply prepare_train to a stream."""
+            ds = ds.cast_column(AUDIO_COLUMN, Audio(sampling_rate=16000))
+            ds = ds.shuffle(seed=42, buffer_size=SHUFFLE_BUFFER)
+            return ds.map(prepare_train)
+
         ds_primary = _load_dataset_with_retry(dataset_name, split=split, streaming=True)
-        ds_primary = ds_primary.cast_column(AUDIO_COLUMN, Audio(sampling_rate=16000))
+        ds_primary = _process_stream(ds_primary)
 
         ds = ds_primary
         if aux_dataset_name and aux_probability > 0:
@@ -194,20 +199,34 @@ def get_train_dataset(
                 ds_aux = ds_aux.cast_column(AUDIO_COLUMN, Audio(sampling_rate=16000))
                 # Filter to ≤30s — longer segments degrade training quality
                 ds_aux = ds_aux.filter(lambda x: x.get("duration", 0) <= 30)
-                # Kirtan uses 'gurmukhi_text' — add 'transcription' column
+                # Kirtan uses 'gurmukhi_text' — add expected text column
                 _tc = text_column
                 ds_aux = ds_aux.map(lambda x: {_tc: x["gurmukhi_text"]})
-                # Select only the columns that primary has so schemas match for interleave
-                ds_aux = ds_aux.select_columns([AUDIO_COLUMN, text_column])
-                ds_primary_slim = ds_primary.select_columns([AUDIO_COLUMN, text_column])
-                # Interleave RAW datasets (before prepare_train) — interleave_datasets
-                # can't handle processed numpy arrays
-                ds = interleave_datasets(
-                    [ds_primary_slim, ds_aux],
-                    probabilities=[1.0 - aux_p, aux_p],
-                    seed=42,
-                    stopping_strategy="all_exhausted",
-                )
+                ds_aux = ds_aux.shuffle(seed=42, buffer_size=SHUFFLE_BUFFER)
+                ds_aux = ds_aux.map(prepare_train)
+
+                # Manual interleave — interleave_datasets can't handle
+                # processed numpy arrays (PyArrow serialization fails)
+                import random as _rng_mod
+                _rng = _rng_mod.Random(42)
+
+                def _interleaved_gen():
+                    it1, it2 = iter(ds_primary), iter(ds_aux)
+                    while True:
+                        use_aux = _rng.random() < aux_p
+                        src_iter = it2 if use_aux else it1
+                        try:
+                            yield next(src_iter)
+                        except StopIteration:
+                            # Restart exhausted stream
+                            if use_aux:
+                                it2 = iter(ds_aux)
+                                yield next(it2)
+                            else:
+                                it1 = iter(ds_primary)
+                                yield next(it1)
+
+                ds = IterableDataset.from_generator(_interleaved_gen)
                 print(
                     f"[data] Training dataset stream mixed: primary={dataset_name}, "
                     f"aux={aux_dataset_name}, aux_probability={aux_p:.2f}"
@@ -221,10 +240,6 @@ def get_train_dataset(
                 )
         else:
             print(f"[data] Training dataset streaming from {dataset_name} (split={split})")
-
-        # Apply shuffle + prepare_train to the (possibly interleaved) stream
-        ds = ds.shuffle(seed=42, buffer_size=SHUFFLE_BUFFER)
-        ds = ds.map(prepare_train)
 
         return ds
 
