@@ -327,6 +327,60 @@ def get_val_dataset(
     return val_dataset
 
 
+def get_kirtan_val_dataset(
+    dataset_name: str,
+    processor: Any,
+    split: str = "validation",
+    text_column: str = "gurmukhi_text",
+    val_size: int = 200,
+    max_duration: float = 30.0,
+) -> Dataset:
+    """Load a kirtan validation set for separate eval alongside sehaj path.
+
+    Uses the dataset's own validation split. Falls back to sampling from train
+    if no validation split exists.
+
+    Args:
+        dataset_name: HuggingFace kirtan dataset identifier.
+        processor: WhisperProcessor with Punjabi tokenizer.
+        split: Dataset split to use (default: "validation").
+        text_column: Name of the transcription column (default: gurmukhi_text).
+        val_size: Number of examples to materialize.
+        max_duration: Maximum audio duration in seconds.
+
+    Returns:
+        Regular Dataset with {"input_features", "labels"} dicts.
+    """
+    stream = _load_dataset_with_retry(dataset_name, split=split, streaming=True)
+    stream = stream.cast_column(AUDIO_COLUMN, Audio(sampling_rate=16000))
+    stream = stream.filter(lambda x: x.get("duration", 0) <= max_duration)
+
+    val_examples = list(stream.take(val_size))
+
+    try:
+        val_dataset = Dataset.from_list(val_examples)
+    except (AttributeError, TypeError):
+        val_dataset = Dataset.from_dict(
+            {k: [ex[k] for ex in val_examples] for k in val_examples[0]}
+        )
+
+    def prepare_val(example: dict) -> dict:
+        audio = example[AUDIO_COLUMN]
+        input_features = processor.feature_extractor(
+            audio["array"], sampling_rate=audio["sampling_rate"]
+        ).input_features[0]
+
+        text = normalize_gurbani_text(example[text_column])
+        labels = processor.tokenizer(text).input_ids
+
+        return {"input_features": input_features, "labels": labels}
+
+    val_dataset = val_dataset.map(prepare_val, remove_columns=val_dataset.column_names)
+
+    print(f"[data] Kirtan validation dataset: {len(val_dataset)} examples materialized in memory")
+    return val_dataset
+
+
 @dataclass
 class DataCollatorSpeechSeq2SeqWithPadding:
     """Data collator that pads speech features and label sequences.

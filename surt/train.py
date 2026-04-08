@@ -128,13 +128,20 @@ class HubPushCallback(TrainerCallback):
 
         Only runs Hub pushes and file writes on rank 0 to prevent race
         conditions in multi-GPU (DDP) training.
+
+        Handles both single-dataset (eval_wer) and multi-dataset
+        (eval_sehaj_path_wer, eval_kirtan_wer) metric keys.
         """
         if not state.is_world_process_zero:
             return
 
         self.eval_count += 1
-        current_wer = metrics.get("eval_wer", float("inf"))
-        current_cer = metrics.get("eval_cer", float("inf"))
+
+        # Support both single-dataset and multi-dataset eval metric keys
+        current_wer = metrics.get("eval_sehaj_path_wer", metrics.get("eval_wer", float("inf")))
+        current_cer = metrics.get("eval_sehaj_path_cer", metrics.get("eval_cer", float("inf")))
+        kirtan_wer = metrics.get("eval_kirtan_wer", None)
+        kirtan_cer = metrics.get("eval_kirtan_cer", None)
         step = state.global_step
 
         is_best = current_wer < self.best_wer
@@ -149,10 +156,13 @@ class HubPushCallback(TrainerCallback):
             reason = "best" if is_best else "periodic"
             self._push_to_hub(model, step, current_wer, current_cer, reason)
 
-        print(
-            f"[train] Eval step {step}: WER={current_wer:.2f} CER={current_cer:.2f} "
-            f"(best_wer={self.best_wer:.2f}, evals={self.eval_count})"
+        msg = (
+            f"[train] Eval step {step}: sehaj_path WER={current_wer:.2f} CER={current_cer:.2f}"
         )
+        if kirtan_wer is not None:
+            msg += f" | kirtan WER={kirtan_wer:.2f} CER={kirtan_cer:.2f}"
+        msg += f" (best_wer={self.best_wer:.2f}, evals={self.eval_count})"
+        print(msg)
 
 
 class SurtTrainer(Seq2SeqTrainer):
@@ -356,6 +366,7 @@ def run_training_job(
     """Run one training job and return (trainer, processor)."""
     from surt.data import (
         DataCollatorSpeechSeq2SeqWithPadding,
+        get_kirtan_val_dataset,
         get_train_dataset,
         get_val_dataset,
     )
@@ -384,6 +395,16 @@ def run_training_job(
         streaming=streaming,
     )
     val_dataset = get_val_dataset(dataset_name, processor)
+
+    # Build eval dataset dict: sehaj_path + kirtan (if aux dataset provided)
+    eval_datasets = {"sehaj_path": val_dataset}
+    if aux_dataset_name:
+        try:
+            kirtan_val = get_kirtan_val_dataset(aux_dataset_name, processor)
+            eval_datasets["kirtan"] = kirtan_val
+        except Exception as e:
+            print(f"[train] WARNING: kirtan val set unavailable: {e}. Evaluating sehaj_path only.")
+
     data_collator = DataCollatorSpeechSeq2SeqWithPadding(
         processor=processor,
         decoder_start_token_id=model.config.decoder_start_token_id,
@@ -415,7 +436,7 @@ def run_training_job(
         model=model,
         args=training_args,
         train_dataset=train_dataset,
-        eval_dataset=val_dataset,
+        eval_dataset=eval_datasets,
         data_collator=data_collator,
         compute_metrics=make_compute_metrics(processor),
         processing_class=processor.feature_extractor,
