@@ -219,6 +219,8 @@ def get_train_dataset(
                     f"aux={aux_dataset_name}, aux_probability={aux_p:.2f}"
                 )
             except Exception as e:
+                import traceback
+                traceback.print_exc()
                 print(
                     f"[data] WARNING: aux dataset unavailable ({aux_dataset_name}): {e}. "
                     "Continuing with primary dataset only."
