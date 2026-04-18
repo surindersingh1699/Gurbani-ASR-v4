@@ -43,20 +43,47 @@ A row is marked `is_simran = true` if:
 
 Defaults: `SIMRAN_DETECT_MIN_REPS = 5`, `SIMRAN_DETECT_RATIO = 0.70`.
 
-### Two-stage downsample
+### Downsample strategy (absolute target, adaptive per-video cap)
 
-**Stage 1 — per-video cap** (maintains voice diversity across the AKJ corpus):
-- For each `video_id`, keep at most `SIMRAN_PER_VIDEO_CAP = 5` simran clips.
-- Random sample within the video; do not take the first N (which would cluster at the session start).
+Simran teaches ONE thing — the ਵਾਹਿਗੁਰੂ repetition pattern. The teaching signal is fixed regardless of dataset size, so simran count is an **absolute target**, not a ratio of dataset size.
 
-**Stage 2 — global cap** (enforces dataset-wide ratio):
-- Compute simran rows remaining after Stage 1.
-- Target: `SIMRAN_TARGET_RATIO = 0.01` (1% of final dataset ≈ 600 rows at 60K total).
-- If over, random-downsample to exactly the target, stratified by `video_id` so no video dominates the surviving simran set.
+**Target**: `SIMRAN_TARGET_COUNT = 750` total simran rows kept (midpoint of empirical 500–1000 range for adequate voice/tempo diversity).
 
-Dropped simran rows are **removed from the dataset**, not flagged. The `is_simran = true` column stays on the surviving rows so training-side samplers can optionally downweight further.
+**Step 1 — compute adaptive per-video cap:**
 
-**Why 1%, not 5%**: simran is a single repeated word — ASR models learn repetitive patterns fast, and ~500 rows across ~50-100 distinct voices is enough to generalize. More than that just biases the decoder toward outputting ਵਾਹਿਗੁਰੂ without teaching anything new. If empirical WER on simran turns out too high after training, bump `SIMRAN_TARGET_RATIO` up; easier to add data than un-bias a trained model.
+```python
+n_simran_videos = count distinct video_ids among is_simran=true rows
+per_video_cap = clamp(ceil(SIMRAN_TARGET_COUNT / n_simran_videos),
+                      min=SIMRAN_PER_VIDEO_MIN,
+                      max=SIMRAN_PER_VIDEO_MAX)
+```
+
+Defaults: `SIMRAN_PER_VIDEO_MIN = 1`, `SIMRAN_PER_VIDEO_MAX = 10`.
+
+Expected behavior across AKJ ingest sizes:
+
+| Videos with simran | per_video_cap | Total kept |
+|---|---|---|
+| ~300 (dense) | 3 | ~900 |
+| ~150 | 5 | ~750 |
+| ~100 | 8 | ~800 |
+| ~50 (sparse) | 10 (capped) | ~500 |
+| ~1 (pathological) | 10 (capped) | ~10 |
+
+The cap prevents a single voice from dominating the simran set.
+
+**Step 2 — per-video cap + round-robin stratified sampling:**
+
+- Group simran rows by `video_id`.
+- Within each video, random sample up to `per_video_cap` rows (not the first N — those cluster at session start).
+- If total surviving rows > `SIMRAN_TARGET_COUNT`, select rows in **round-robin order** across videos: take video₁[0], video₂[0], …, videoₙ[0], then video₁[1], video₂[1], …, until target met. This ensures each video contributes proportionally before any video contributes multiply.
+
+Dropped simran rows are **removed from the dataset**, not flagged. The `is_simran = true` column stays on the surviving rows for training-side samplers.
+
+**Why 750, not 5% of dataset**:
+- Simran is a single repeated word — ASR models learn repetitive patterns fast. ~500-1000 rows across diverse voices is enough.
+- Absolute count decouples simran from dataset growth: if the dataset doubles, you don't accidentally balloon simran to 1,200 rows (wastefully over-teaching).
+- If empirical simran WER turns out high after training, bump `SIMRAN_TARGET_COUNT` up; easier to add data than un-bias a trained model.
 
 ### Short-circuit (applies to surviving simran rows in the canonical pipeline)
 
@@ -95,15 +122,16 @@ Applied unconditionally, runs in microseconds. Zero API cost. No risk of corrupt
 |---|---|---|
 | `SIMRAN_DETECT_MIN_REPS` | 5 | Min consecutive ਵਾਹਿਗੁਰੂ tokens to trigger detection |
 | `SIMRAN_DETECT_RATIO` | 0.70 | Min fraction of clip tokens that must be ਵਾਹਿਗੁਰੂ |
-| `SIMRAN_PER_VIDEO_CAP` | 5 | Max simran clips kept per video |
-| `SIMRAN_TARGET_RATIO` | 0.01 | Target fraction of final dataset that is simran |
+| `SIMRAN_TARGET_COUNT` | 750 | Absolute target count of simran rows in final dataset |
+| `SIMRAN_PER_VIDEO_MIN` | 1 | Lower clamp on adaptive per-video cap |
+| `SIMRAN_PER_VIDEO_MAX` | 10 | Upper clamp on adaptive per-video cap |
 
 ### Expected outcome
 
 - Pre-downsample simran count: ~10–15K rows (at 17–25% of 60K) from AKJ alone.
-- Post-downsample: ~600 rows (~1% of 60K). Preserves voice diversity via per-video cap; avoids ASR bias toward ਵਾਹਿਗੁਰੂ output.
+- Post-downsample: ~500–900 rows depending on AKJ video count; guaranteed diversity via adaptive per-video cap clamped to [1, 10].
 - Waheguru normalization: ~5–10% of non-simran rows will have ≥1 matra-variant `ਵਾਹੇਗੁਰੂ`-style token that gets canonicalized in `final_text`.
-- Logs: `simran_detected=N, after_per_video_cap=N, after_global_cap=N, waheguru_normalized=N` printed to stderr.
+- Logs: `simran_detected=N, n_simran_videos=N, per_video_cap=N, after_per_video_cap=N, after_round_robin=N, waheguru_normalized=N` printed to stderr.
 
 ## 2. Inputs & outputs
 
