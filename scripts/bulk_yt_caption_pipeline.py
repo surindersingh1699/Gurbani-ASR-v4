@@ -94,29 +94,67 @@ def enumerate_channel(url: str, logfp: Path, pot: str,
     return out
 
 
-def probe_captions(video_id: str, pot: str, cookies: Path | None,
-                   logfp: Path) -> bool:
+RATE_LIMIT_MARKERS = (
+    "rate-limited by YouTube",
+    "rate-limited",
+    "content isn't available, try again later",
+    "This content isn't available",
+    "Sign in to confirm you're not a bot",
+)
+
+
+def _is_rate_limited(text: str) -> bool:
+    return any(m in text for m in RATE_LIMIT_MARKERS)
+
+
+def try_fetch_caption(video_id: str, workdir: Path, lang: str, pot: str,
+                      cookies: Path | None, logfp: Path
+                      ) -> tuple[str, Path | None]:
+    """Download ONLY the pa-orig caption (no audio). Returns (status, path).
+
+    status: "ok" | "no_caption" | "rate_limited" | "unavailable" | "error"
+    path:   caption file path if status == "ok"
+
+    This replaces the separate --list-subs probe AND caches the caption so
+    the main chunker can reuse it (no duplicate request).
+    """
+    workdir.mkdir(parents=True, exist_ok=True)
     cmd = [
-        "yt-dlp", "--list-subs", "--skip-download",
+        "yt-dlp", "--skip-download",
+        "--write-auto-subs", "--sub-langs", lang, "--sub-format", "json3",
+        "--no-playlist",
+        "--sleep-requests", "1", "--min-sleep-interval", "1",
+        "--max-sleep-interval", "3",
         "--extractor-args", f"youtube:pot_provider={pot}",
+        "-o", str(workdir / f"{video_id}.%(ext)s"),
     ]
     if cookies and cookies.exists():
         cmd += ["--cookies", str(cookies)]
     cmd.append(f"https://www.youtube.com/watch?v={video_id}")
     try:
-        r = run(cmd, timeout=90)
+        r = run(cmd, timeout=120)
     except subprocess.TimeoutExpired:
-        return False
+        return "error", None
+
     out = (r.stdout or "") + (r.stderr or "")
-    # Must have pa-orig specifically (the original-lang ASR). Also skip if
-    # the video is reported UNPLAYABLE — then list-subs tends to succeed but
-    # download will fail, so we don't save any work by filtering here.
-    return "pa-orig" in out
+    if _is_rate_limited(out):
+        return "rate_limited", None
+
+    caps = sorted(workdir.glob(f"{video_id}.{lang}*.json3"))
+    if caps:
+        return "ok", caps[0]
+
+    # No caption file; check whether the video itself is unavailable.
+    if ("UNPLAYABLE" in out or "Video unavailable" in out or
+            "This content isn't available" in out):
+        return "unavailable", None
+    return "no_caption", None
 
 
 def run_chunker(script: Path, venv_python: Path, video_id: str,
                 out_root: Path, pot: str, cookies: Path | None,
-                logfp: Path) -> tuple[bool, Path]:
+                logfp: Path) -> tuple[str, Path]:
+    """Returns status: "ok" | "rate_limited" | "fail" | "timeout"."""
     cmd = [
         str(venv_python), str(script),
         "--video-id", video_id,
@@ -130,12 +168,15 @@ def run_chunker(script: Path, venv_python: Path, video_id: str,
         r = run(cmd, timeout=3600)
     except subprocess.TimeoutExpired:
         log(logfp, f"  CHUNKER TIMEOUT {video_id}")
-        return False, out_root / video_id
+        return "timeout", out_root / video_id
     if r.returncode != 0:
-        tail = (r.stderr or r.stdout or "")[-400:]
+        tail = (r.stderr or r.stdout or "")[-600:]
+        if _is_rate_limited(tail):
+            log(logfp, f"  CHUNKER RATE-LIMITED {video_id}")
+            return "rate_limited", out_root / video_id
         log(logfp, f"  CHUNKER FAIL {video_id} rc={r.returncode} tail={tail!r}")
-        return False, out_root / video_id
-    return True, out_root / video_id
+        return "fail", out_root / video_id
+    return "ok", out_root / video_id
 
 
 def cleanup_video_dir(workdir: Path, logfp: Path) -> None:
@@ -247,6 +288,9 @@ def main() -> int:
                     help="Skip videos longer than this (likely live streams).")
     ap.add_argument("--push-every", type=int, default=15,
                     help="Push a dataset snapshot to HF after this many videos.")
+    ap.add_argument("--inter-video-sleep", type=float, default=8.0,
+                    help="Seconds to sleep between successful videos "
+                         "(gentle pacing to avoid YouTube rate limits).")
     ap.add_argument("--channels", default="",
                     help="Comma-separated YouTube URLs. If empty, use DEFAULT_SEEDS.")
     ap.add_argument("--pot-provider", default="http://127.0.0.1:4416")
@@ -337,6 +381,7 @@ def main() -> int:
         return total_s / 3600.0
 
     processed_since_push = 0
+    consecutive_rate_limits = 0
     for v in interleaved:
         vid = v["id"]
         if vid in done:
@@ -351,32 +396,64 @@ def main() -> int:
                    f"({v.get('duration_s',0)/60:.0f}min, "
                    f"ch={v.get('channel_slug','?')}) {v.get('title','')[:80]!r}")
 
-        if not probe_captions(vid, args.pot_provider, args.cookies, logfp):
+        workdir = staging / vid
+        status, cap_path = try_fetch_caption(vid, workdir, "pa-orig",
+                                             args.pot_provider, args.cookies,
+                                             logfp)
+
+        if status == "rate_limited":
+            consecutive_rate_limits += 1
+            wait_s = min(60 * 10 * consecutive_rate_limits, 3600)
+            log(logfp, f"  RATE-LIMITED (x{consecutive_rate_limits}); "
+                       f"sleeping {wait_s//60}min. Will retry {vid} later.")
+            # Do NOT mark as done — leave for retry.
+            time.sleep(wait_s)
+            continue
+        else:
+            consecutive_rate_limits = 0
+
+        if status in ("no_caption", "unavailable", "error"):
             with skipped_fp.open("a") as f:
-                f.write(json.dumps({"id": vid, "reason": "no_pa_orig",
+                f.write(json.dumps({"id": vid, "reason": status,
                                     "title": v.get("title", ""),
                                     "channel": v.get("channel_slug", "")},
                                    ensure_ascii=False) + "\n")
             with done_fp.open("a") as f:
                 f.write(vid + "\n")
             done.add(vid)
-            log(logfp, f"  skip (no pa-orig)")
+            log(logfp, f"  skip ({status})")
+            # Gentle pacing so we do not re-trigger rate limits.
+            time.sleep(3)
             continue
 
-        ok, workdir = run_chunker(args.chunker_script, args.venv_python,
-                                  vid, staging, args.pot_provider,
-                                  args.cookies, logfp)
-        if not ok:
+        # status == "ok" -> we have the caption cached. Now run the chunker
+        # (which will download the webm and reuse the cached caption via
+        # pilot_yt_caption_chunks.py's _find_master/cap_glob short-circuit).
+        chk_status, workdir = run_chunker(
+            args.chunker_script, args.venv_python, vid, staging,
+            args.pot_provider, args.cookies, logfp,
+        )
+        if chk_status == "rate_limited":
+            consecutive_rate_limits += 1
+            wait_s = min(60 * 10 * consecutive_rate_limits, 3600)
+            log(logfp, f"  chunker RATE-LIMITED; sleeping {wait_s//60}min. "
+                       f"Will retry {vid} later.")
+            time.sleep(wait_s)
+            continue
+        if chk_status != "ok":
             with skipped_fp.open("a") as f:
-                f.write(json.dumps({"id": vid, "reason": "chunker_fail",
+                f.write(json.dumps({"id": vid,
+                                    "reason": f"chunker_{chk_status}",
                                     "title": v.get("title", ""),
                                     "channel": v.get("channel_slug", "")},
                                    ensure_ascii=False) + "\n")
             with done_fp.open("a") as f:
                 f.write(vid + "\n")
             done.add(vid)
+            time.sleep(10)
             continue
 
+        consecutive_rate_limits = 0
         cleanup_video_dir(workdir, logfp)
 
         manifest_fp = workdir / "manifest.jsonl"
@@ -397,6 +474,9 @@ def main() -> int:
             if url:
                 log(logfp, f"  snapshot -> {url}")
             processed_since_push = 0
+
+        # Gentle pacing between videos so we don't re-trigger rate limits.
+        time.sleep(args.inter_video_sleep)
 
     # Final push.
     log(logfp, f"final push; total hours = {current_hours():.1f}")
