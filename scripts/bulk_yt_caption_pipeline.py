@@ -123,6 +123,7 @@ def try_fetch_caption(video_id: str, workdir: Path, lang: str, pot: str,
         "yt-dlp", "--skip-download",
         "--write-auto-subs", "--sub-langs", lang, "--sub-format", "json3",
         "--no-playlist",
+        "--force-ipv4",          # YT CDN blocks Hetzner IPv6 (see chunker docstring)
         "--sleep-requests", "1", "--min-sleep-interval", "1",
         "--max-sleep-interval", "3",
         "--extractor-args", f"youtube:pot_provider={pot}",

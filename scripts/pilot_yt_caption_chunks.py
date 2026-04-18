@@ -206,6 +206,10 @@ def download_audio_and_captions(video_id: str, workdir: Path, lang: str,
         "--sub-langs", lang,
         "--sub-format", "json3",
         "--no-playlist",
+        # --force-ipv4: YouTube's googlevideo CDN was observed blocking
+        # Hetzner's IPv6 address (2a01:4f8:c014:48bb::1) with 403 while
+        # accepting the same request on IPv4. Pin to IPv4 to avoid this.
+        "--force-ipv4",
         "-o", str(workdir / f"{video_id}.%(ext)s"),
     ]
     if pot_provider:
