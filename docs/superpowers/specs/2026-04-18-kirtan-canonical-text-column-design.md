@@ -27,7 +27,11 @@ Filters (row is dropped if ANY is true):
 3. **Caption is only `>>` markers / punctuation / ASCII** — dead row, no Gurmukhi content. Drop.
 4. **(Optional, tuneable)** Caption duration-to-token ratio outliers: if `duration_s / n_gurmukhi_tokens > 4` (clip is very slow) or `< 0.1` (clip has far too many tokens for its length), flag for manual review. Default: flag only, don't drop.
 
-Implementation: add as Phase −1 in `scripts/add_canonical_column.py`, before any STTM/LLM work. Emit a summary to stderr: `dropped_short=N, dropped_single_token=N, dropped_no_gurmukhi=N`.
+Normalization (applied to all surviving rows, does not drop):
+
+5. **Strip ASR `<unk>` artifacts** (`STRIP_UNK_ARTIFACTS=true`, default). Pattern: `<unk?>?|<un|<k>?|unk>|un>|<k` replaced with single space, then re-tokenize. Catches sehaj-path ASR artifacts like `ਜਾਲunk>`, `ਕਢਾਇ<un`, `ਸਾਲਾਹਿਹਿ<k` that corrupt STTM alignment. Should run BEFORE tokenization.
+
+Implementation: add as Phase −1 in `scripts/add_canonical_column.py`, before any STTM/LLM work. Emit a summary to stderr: `dropped_short=N, dropped_single_token=N, dropped_no_gurmukhi=N, unk_artifacts_stripped=N`.
 
 **Expected drop rate** (from inspecting the sample data): ~5–10% of rows — worth removing before the expensive STTM + Gemini passes, and avoids polluting the training set with meaningless clips.
 
@@ -183,6 +187,64 @@ Pre-built once per run:
 
 **Tier 2 (fallback, conditional):** if top-1 margin is low (margin < `M_MIN`, default 0.05) OR if Phase 3 leaves a contiguous run of `≥ R_MIN` (default 3) Gurmukhi tokens unaligned, consult a **global SGGS inverted index**: `{canonical_token_skel → [(unicode_token, line_id, shabad_id)]}`. Used only for orphan spans, with a secondary_shabad_id tagged per span in `canonical_line_ids` metadata.
 
+### Phase 2.5 — Sirlekh (shabad-header) indexing and normalization
+
+(Enabled when `INCLUDE_SIRLEKH=true`, default `true` for both kirtan and sehaj.)
+
+Extend the STTM SQL query from `type_id IN (1, 3, 4)` to `type_id IN (1, 3, 4, 5)` so that shabad headers like `ਸ੍ਰੀਰਾਗੁ ਮਹਲਾ ੫ ॥` (`type_id=5`, Sirlekh) are part of the consonant-skeleton index. Without this, any row containing header text falls through to `unchanged`.
+
+Additionally, build a small canonical-header normalization table for the most common variants that ASR produces (observed on sehaj path):
+
+```
+"ਸੀ ਰਾਗ ਮਹਲਾ ਪੰ"       → "ਸ੍ਰੀਰਾਗੁ ਮਹਲਾ ੫"
+"ਸੀਰਾਗ ਮਹਲਾ"           → "ਸ੍ਰੀਰਾਗੁ ਮਹਲਾ"
+"ਸ੍ਰੀਰਾਗੁ ਮਹਲਾ>"       → "ਸ੍ਰੀਰਾਗੁ ਮਹਲਾ"
+"ਸਿ੍ਰ ਰਾਗੁ ਮਹਲਾ"      → "ਸ੍ਰੀਰਾਗੁ ਮਹਲਾ"
+"ਸਿ੍ਰੀਰਾਗੁ ਮਹਲਾ"       → "ਸ੍ਰੀਰਾਗੁ ਮਹਲਾ"
+```
+
+Applied as a regex sweep before tokenization, only when flag is true.
+
+### Phase 2.6 — Multi-shabad row splitting
+
+(Enabled when `SPLIT_MULTI_SHABAD_ROWS=true`, default `true` for both datasets.)
+
+Sehaj path (and occasionally kirtan) has rows that straddle a shabad boundary:
+
+```
+Row:  ਕਢਾਇ ਸੀਰਾਗ ਮਹਲਾ ਘੜੀ ਮੁਹਤ ਕਾ ਪਾਹੁਣਾ
+         └ shabad A ┘ └ header ┘ └─ shabad B ──┘
+```
+
+Detect mid-row Sirlekh patterns via:
+
+```python
+SIRLEKH_RE = re.compile(
+    r'(ਸ੍ਰੀ\s*ਰਾਗੁ?|ਸੀ\s*ਰਾਗ|ਸਿ੍ਰ\s*ਰਾਗੁ?|ਸੀਰਾਗ|ਸਿਰੀੀ?\s*ਰਾਗੁ?)\s*ਮਹਲਾ'
+)
+```
+
+If a match is found at position `p > 3` (i.e., not at row start), split the row into sub-parts at the Sirlekh boundary and run alignment on each sub-part independently. Merge the results with the shabad header between them in the final `final_text`. Emit row-level `split_at=[p1, p2, ...]` in the audit sidecar.
+
+### Phase 2.7 — Sequential shabad retrieval (sehaj-specific)
+
+(Enabled when `SEQUENTIAL_SHABAD_RETRIEVAL=true`. Default `true` for sehaj, `false` for kirtan.)
+
+In sehaj path, reading progresses linearly through SGGS. If row `i-1` matched shabad X, row `i` is almost certainly in shabad X or the immediately-following shabad (X+1 in `order_id` sequence). Apply a strong prior:
+
+```python
+# Bias retrieval scores by recency of match in this video
+for candidate_sid, score in shabad_scores.items():
+    if candidate_sid == prev_shabad_id:
+        score *= (1 + SEQUENTIAL_CURRENT_BOOST)   # default 0.8
+    elif candidate_sid == next_shabad_in_sequence(prev_shabad_id):
+        score *= (1 + SEQUENTIAL_NEXT_BOOST)      # default 0.5
+```
+
+`next_shabad_in_sequence(sid)` looks up the shabad with the smallest `order_id` greater than `sid`'s last line's `order_id`. Pre-computed once.
+
+This is **NOT** enabled for kirtan because ragis often medley across shabads — a sequential prior would bias alignment toward the wrong shabad in that case.
+
 ### Phase 3 — Phrase-level alignment (fine, monotonic)
 
 **Full Needleman–Wunsch DP** over `(caption_tokens × retrieved_shabad_token_stream)` with **monotonic advance on the SGGS side** (required to fix the prototype's greedy bug where `ਰੋਤੀ` aligned to an earlier `ਰੁਖੀ` instead of the correct forward `ਰੋਟੀ`). The DP table is O(m·n) with m = caption tokens (typically < 20) and n = shabad tokens (typically < 200), so ~10ms per row on CPU.
@@ -303,6 +365,29 @@ Note: SGGS actually has `ਗੋਇਦਾ` (no tippi on ਗੋ) on this Ang — n
 
 ## 7. Tuneable constants (exposed as CLI flags on `add_canonical_column.py`)
 
+### Dataset-specific defaults
+
+Same pipeline code for both datasets; configuration flags differ:
+
+| Flag | Kirtan default | Sehaj-path default | Purpose |
+|---|---|---|---|
+| `STRIP_UNK_ARTIFACTS` | `true` | `true` | Pre-clean `<unk>`/`<un`/`<k>` ASR noise |
+| `INCLUDE_SIRLEKH` | `true` | `true` | Index shabad headers (`type_id=5`) |
+| `SPLIT_MULTI_SHABAD_ROWS` | `true` | `true` | Split rows with mid-row Sirlekh |
+| `SEQUENTIAL_SHABAD_RETRIEVAL` | `false` | `true` | Bias retrieval toward previous row's shabad (sehaj is linear; kirtan medleys) |
+| `USE_LLM_FALLBACK` | `true` | `true` | Gemini on `unchanged`/`review` (catches the ~5% tail for sehaj, ~23% tail for kirtan) |
+| `SIMRAN_DETECTION` | `true` | `false` | AKJ-specific; sehaj doesn't have simran blocks |
+
+Expected confident-correction rates with defaults applied:
+
+| Dataset | STTM alone | + sehaj-specific additions | + LLM fallback |
+|---|---:|---:|---:|
+| Kirtan | 61–76% | 65–80% | **~92%** |
+| Sehaj path | 74% | **~95%** | **~99%** |
+
+### Core alignment tuneables (both datasets)
+
+
 | Constant | Default | Purpose |
 |---|---|---|
 | `NGRAM_N` | 4 | Shabad-retrieval n-gram size |
@@ -355,11 +440,14 @@ Dry-run flow: run on 1000 rows, inspect `match_flag` histogram and spot-check 20
 
 ## 11. LLM fallback pass (ADDITIVE, runs AFTER §1.5 cleaning + DB pipeline)
 
-**When to enable**: only for datasets with ragi variation, improvised kirtan, or heavy transcription noise (i.e., the `gurbani-kirtan-yt-captions-300h` target).
+**Both datasets use LLM fallback** — but sehaj path needs it for a much smaller tail after sehaj-specific STTM additions bring the confident-correction rate to ~95%.
 
-**When to skip**: linear-reading datasets like `gurbani-sehajpath`. Empirically validated on a 100-row sehaj path sample: STTM alone gets 92% attempted-correction rate (68% replaced, 6% matched, 18% review, 8% unchanged) with zero need for LLM. Sehaj path has no ragi variations, no repetitions, no out-of-SGGS content — every row's text corresponds to an actual SGGS line, so STTM's consonant-skeleton phrase alignment handles all the ASR-style noise natively. LLM adds cost without adding quality for this dataset.
+Empirical validation:
 
-Gate via config flag `USE_LLM_FALLBACK`: `true` for kirtan, `false` for sehaj path. Same code path, different config.
+- **Kirtan** (`gurbani-kirtan-yt-captions-300h`): STTM alone hits 61–76% confident corrections (varies by shabad). LLM on `unchanged+review` (~23% of rows) lifts this to ~90–95%.
+- **Sehaj path** (`gurbani-sehajpath`): STTM alone hits 74% (validated on 100-row sample). Adding sehaj-specific pre-cleaning (§1.5 `STRIP_UNK_ARTIFACTS`) + Sirlekh indexing (§3.5) + multi-shabad row splitting (§3.6) + sequential retrieval (§3.7) projects ~95%. LLM picks up the remaining ~5% tail.
+
+Same code path for both datasets; the LLM stage decides whether to run per-row based on `decision`. The only difference is how many rows qualify.
 
 For rows the DB pipeline marks `decision IN (unchanged, review)` (when enabled), run a second-stage LLM pass that adds three MORE columns. The main `final_text` / `sggs_line` / `decision` columns stay untouched. The LLM pass never modifies DB-grounded outputs — it only adds its own opinion as separate columns that downstream can choose to use or ignore.
 
