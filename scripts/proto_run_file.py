@@ -131,9 +131,9 @@ def main():
     print(f"[v2] LLM candidates: {len(llm_candidates)} → {len(unique)} unique → "
           f"{len(by_shabad)} shabads", file=sys.stderr)
 
-    api_key = os.environ.get("GEMINI_API_KEY")
+    api_key = os.environ.get("GEMINI_API_KEY") if os.environ.get("USE_LLM", "1") != "0" else None
     if not api_key:
-        print("[llm] no key, skipping", file=sys.stderr)
+        print("[llm] skipping (no key or USE_LLM=0)", file=sys.stderr)
         llm_results: dict[str, dict] = {}
     else:
         client = genai.Client(api_key=api_key)

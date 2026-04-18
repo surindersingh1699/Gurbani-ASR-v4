@@ -355,7 +355,13 @@ Dry-run flow: run on 1000 rows, inspect `match_flag` histogram and spot-check 20
 
 ## 11. LLM fallback pass (ADDITIVE, runs AFTER §1.5 cleaning + DB pipeline)
 
-For rows the DB pipeline marks `decision IN (unchanged, review)`, run a second-stage LLM pass that adds three MORE columns. The main `final_text` / `sggs_line` / `decision` columns stay untouched. The LLM pass never modifies DB-grounded outputs — it only adds its own opinion as separate columns that downstream can choose to use or ignore.
+**When to enable**: only for datasets with ragi variation, improvised kirtan, or heavy transcription noise (i.e., the `gurbani-kirtan-yt-captions-300h` target).
+
+**When to skip**: linear-reading datasets like `gurbani-sehajpath`. Empirically validated on a 100-row sehaj path sample: STTM alone gets 92% attempted-correction rate (68% replaced, 6% matched, 18% review, 8% unchanged) with zero need for LLM. Sehaj path has no ragi variations, no repetitions, no out-of-SGGS content — every row's text corresponds to an actual SGGS line, so STTM's consonant-skeleton phrase alignment handles all the ASR-style noise natively. LLM adds cost without adding quality for this dataset.
+
+Gate via config flag `USE_LLM_FALLBACK`: `true` for kirtan, `false` for sehaj path. Same code path, different config.
+
+For rows the DB pipeline marks `decision IN (unchanged, review)` (when enabled), run a second-stage LLM pass that adds three MORE columns. The main `final_text` / `sggs_line` / `decision` columns stay untouched. The LLM pass never modifies DB-grounded outputs — it only adds its own opinion as separate columns that downstream can choose to use or ignore.
 
 ### Additional columns (additive, never overwriting DB pipeline)
 
