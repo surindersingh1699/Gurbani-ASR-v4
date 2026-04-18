@@ -43,6 +43,7 @@ text coalescing matched the UI to the character.
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import json
 import os
 import random
@@ -374,6 +375,12 @@ def main() -> int:
     ap.add_argument("--public", action="store_true",
                     help="Push as public (default: private).")
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--slice-workers", type=int, default=8,
+                    help="Number of parallel ffmpeg slice workers. Each "
+                         "slice is an independent subprocess reading the "
+                         "shared webm master, so this scales linearly with "
+                         "CPU cores (Hetzner has 16). No effect on YouTube "
+                         "request rate — pure local CPU parallelism.")
     args = ap.parse_args()
 
     workdir = args.out / args.video_id
@@ -394,6 +401,12 @@ def main() -> int:
     kept: list[dict] = []
     dropped: list[dict] = []
     offset = args.caption_offset_s
+
+    # slice_tasks collects (master, clip_path, start_s, dur_s, pad_to_s)
+    # tuples so we can run ffmpeg slices in parallel AFTER the drop/keep
+    # decisions are made. Each slice is an independent subprocess, safe to
+    # parallelize.
+    slice_tasks: list[tuple[Path, Path, float, float, float | None]] = []
 
     if args.clip_mode == "caption":
         lines = build_ui_transcript_lines(cues, duration=duration)
@@ -424,7 +437,7 @@ def main() -> int:
                     "n_cues": n_cues,
                 })
                 continue
-            slice_clip(master, clip_path, start, dur_s, pad_to_s=None)
+            slice_tasks.append((master, clip_path, start, dur_s, None))
             kept.append({
                 "clip_id": f"{args.video_id}_clip_{i:05d}",
                 "audio_path": f"clips/{clip_name}",
@@ -470,7 +483,7 @@ def main() -> int:
             clip_path = clips_dir / clip_name
             dur_s = nominal_end - start
             pad_to = W if (i == n_full and include_tail and dur_s < W) else None
-            slice_clip(master, clip_path, start, dur_s, pad_to_s=pad_to)
+            slice_tasks.append((master, clip_path, start, dur_s, pad_to))
             kept.append({
                 "clip_id": f"{args.video_id}_clip_{i:05d}",
                 "audio_path": f"clips/{clip_name}",
@@ -483,6 +496,21 @@ def main() -> int:
                 "caption_offset_s": offset,
                 "clip_mode": "fixed",
             })
+
+    # Parallel ffmpeg slicing. Each ffmpeg call is an independent
+    # subprocess reading the shared webm master and writing its own FLAC,
+    # so ThreadPoolExecutor parallelizes safely. With max_workers=8 on
+    # Hetzner's 16-core box this is the biggest wall-time win we can make
+    # on the chunker without touching YouTube request rates.
+    if slice_tasks:
+        def _do_slice(t: tuple[Path, Path, float, float, float | None]) -> None:
+            slice_clip(*t)
+        n_workers = max(1, args.slice_workers)
+        print(f"[info] slicing {len(slice_tasks)} clips with "
+              f"{n_workers} parallel workers", file=sys.stderr)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=n_workers) as ex:
+            # materialize to force errors to raise here, not silently
+            list(ex.map(_do_slice, slice_tasks))
 
     (workdir / "manifest.jsonl").write_text(
         "\n".join(json.dumps(m, ensure_ascii=False) for m in kept) + "\n",
