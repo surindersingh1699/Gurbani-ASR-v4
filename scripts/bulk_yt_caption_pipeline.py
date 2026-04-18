@@ -196,25 +196,50 @@ def load_done(done_fp: Path) -> set[str]:
     return {l.strip() for l in done_fp.read_text().splitlines() if l.strip()}
 
 
-def push_snapshot(staging: Path, repo: str, public: bool,
-                  logfp: Path) -> str | None:
-    """Build combined HF dataset from all per-video manifests and push."""
-    try:
-        from datasets import Audio, Dataset
-        from huggingface_hub import HfApi
-    except ImportError as e:
-        log(logfp, f"  PUSH FAIL (import): {e}")
-        return None
-    token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
-    if not token:
-        log(logfp, "  PUSH FAIL: no HF_TOKEN in env")
-        return None
+README_UNIFIED_YAML = """---
+configs:
+  - config_name: default
+    data_files:
+      - split: train
+        path: "data/*.parquet"
+---
 
+# Gurbani YouTube caption dataset
+
+Built incrementally by `scripts/bulk_yt_caption_pipeline.py` using the
+native-webm + UI-transcript-line caption-mode pipeline (see
+`feedback_yt_caption_pipeline.md` in the agent memory for the method).
+
+Each parquet shard in `data/` is an **additive batch**; new shards are
+uploaded without rewriting previous ones. `datasets.load_dataset(repo)`
+returns the union of all shards as a single `train` split thanks to the
+glob in the YAML config above.
+
+- sources: YouTube auto-captions (`pa-orig`) from per-video provenance
+  in the `video_id` column
+- pipeline rules: native `webm/opus` download on IPv4; no resample at
+  master stage; clip boundaries = YouTube transcript-panel UI lines
+  (pair consecutive content events); `caption_offset_s = 0`
+- Last snapshot: {TIMESTAMP}
+"""
+
+
+def _load_pushed(pushed_fp: Path) -> set[str]:
+    if not pushed_fp.exists():
+        return set()
+    return {l.strip() for l in pushed_fp.read_text().splitlines() if l.strip()}
+
+
+def _manifests_to_rows(manifests: list[Path]) -> tuple[list[dict], list[str]]:
+    """Walk per-video manifest.jsonl files, emit dataset rows + list of
+    video_ids that contributed at least one row."""
     rows: list[dict] = []
-    for manifest_fp in sorted(staging.glob("*/manifest.jsonl")):
-        vid = manifest_fp.parent.name
-        video_root = manifest_fp.parent
-        for line in manifest_fp.read_text().splitlines():
+    vids: list[str] = []
+    for mf in manifests:
+        vid = mf.parent.name
+        video_root = mf.parent
+        before = len(rows)
+        for line in mf.read_text().splitlines():
             if not line.strip():
                 continue
             m = json.loads(line)
@@ -229,14 +254,129 @@ def push_snapshot(staging: Path, repo: str, public: bool,
                 "clip_id": m.get("clip_id", ""),
                 "start_s": m.get("start_s", 0.0),
                 "end_s": m.get("end_s", 0.0),
-                "duration_s": m.get("duration_s", m.get("end_s", 0.0) - m.get("start_s", 0.0)),
+                "duration_s": m.get(
+                    "duration_s",
+                    m.get("end_s", 0.0) - m.get("start_s", 0.0),
+                ),
                 "n_cues": m.get("n_cues", 0),
                 "clip_mode": m.get("clip_mode", "caption"),
                 "caption_offset_s": m.get("caption_offset_s", 0.0),
                 "video_id": vid,
                 "caption_lang": "pa-orig",
             })
+        if len(rows) > before:
+            vids.append(vid)
+    return rows, vids
 
+
+def push_additive(staging: Path, repo: str, public: bool,
+                  pushed_fp: Path, logfp: Path) -> str | None:
+    """Upload ONLY videos in staging that aren't in `pushed_fp` yet, as a
+    new HF split (which maps to a new set of parquet files under `data/`
+    that do NOT overwrite existing shards).
+
+    On success, appends the newly-pushed video ids to `pushed_fp`. On
+    first push to a repo, also uploads/refreshes README.md with a
+    YAML config that globs every parquet in `data/` as one unified train
+    split, so existing `data/train-*.parquet` shards from the legacy
+    replace-mode snapshots and new `data/batch_*.parquet` shards from
+    this additive mode both load cleanly as a single `train` dataset.
+    """
+    try:
+        from datasets import Audio, Dataset
+        from huggingface_hub import HfApi, create_repo
+    except ImportError as e:
+        log(logfp, f"  PUSH FAIL (import): {e}")
+        return None
+    token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+    if not token:
+        log(logfp, "  PUSH FAIL: no HF_TOKEN in env")
+        return None
+
+    pushed = _load_pushed(pushed_fp)
+    all_manifests = sorted(staging.glob("*/manifest.jsonl"))
+    new_manifests = [m for m in all_manifests if m.parent.name not in pushed]
+    if not new_manifests:
+        log(logfp, "  PUSH SKIP (no new videos since last push)")
+        return None
+
+    rows, new_vids = _manifests_to_rows(new_manifests)
+    if not rows:
+        log(logfp, "  PUSH SKIP (new manifests had zero rows)")
+        return None
+
+    total_s = sum(r["duration_s"] for r in rows)
+    ts = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+    split_name = f"batch_{ts}"
+    log(logfp,
+        f"  additive push: {len(new_vids)} new videos, {len(rows)} clips, "
+        f"{total_s/3600:.2f}h  split={split_name}")
+
+    # Make sure the repo exists (first-ever push scenario).
+    try:
+        create_repo(repo_id=repo, repo_type="dataset",
+                    private=(not public), exist_ok=True, token=token)
+    except Exception as e:
+        log(logfp, f"  create_repo warn: {e!r}")
+
+    # Push as a NEW split. datasets writes the parquet shards to
+    # `data/<split_name>-NNNNN-of-MMMMM.parquet` without touching other
+    # splits' shards.
+    try:
+        ds = Dataset.from_list(rows).cast_column(
+            "audio", Audio(sampling_rate=16000)
+        )
+        ds.push_to_hub(repo, split=split_name,
+                       private=(not public), token=token)
+    except Exception as e:
+        log(logfp, f"  PUSH FAIL (push_to_hub split={split_name}): {e!r}")
+        return None
+
+    # Record successful push BEFORE the README upload (README is nice-to-
+    # have; losing track of pushed is more expensive).
+    with pushed_fp.open("a") as f:
+        for vid in new_vids:
+            f.write(vid + "\n")
+
+    # Overwrite README.md with our unified-config YAML so load_dataset
+    # returns the full union as a single train split. push_to_hub writes
+    # a dataset_infos.json / generates its own README that doesn't use
+    # the data_files glob we need; this upload happens last so it wins.
+    try:
+        api = HfApi(token=token)
+        api.upload_file(
+            path_or_fileobj=README_UNIFIED_YAML.replace(
+                "{TIMESTAMP}", now()
+            ).encode("utf-8"),
+            path_in_repo="README.md",
+            repo_id=repo,
+            repo_type="dataset",
+        )
+    except Exception as e:
+        log(logfp, f"  README upload fail: {e!r}")
+
+    return f"https://huggingface.co/datasets/{repo}"
+
+
+# Kept as fallback for runs that explicitly pass --legacy-replace-push.
+def push_snapshot(staging: Path, repo: str, public: bool,
+                  logfp: Path) -> str | None:
+    """Legacy replace-style push: rebuilds dataset from all staging/*
+    manifests and calls Dataset.push_to_hub(split='train') which REPLACES
+    the dataset's train split. Every push re-uploads everything, so push
+    time grows with dataset size. Prefer push_additive()."""
+    try:
+        from datasets import Audio, Dataset
+        from huggingface_hub import HfApi
+    except ImportError as e:
+        log(logfp, f"  PUSH FAIL (import): {e}")
+        return None
+    token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+    if not token:
+        log(logfp, "  PUSH FAIL: no HF_TOKEN in env")
+        return None
+
+    rows, _ = _manifests_to_rows(sorted(staging.glob("*/manifest.jsonl")))
     if not rows:
         log(logfp, "  PUSH SKIP (no rows)")
         return None
@@ -251,7 +391,6 @@ def push_snapshot(staging: Path, repo: str, public: bool,
         log(logfp, f"  PUSH FAIL (push_to_hub): {e!r}")
         return None
 
-    # Write a quick README.
     try:
         api = HfApi(token=token)
         readme = (
@@ -289,6 +428,10 @@ def main() -> int:
                     help="Skip videos longer than this (likely live streams).")
     ap.add_argument("--push-every", type=int, default=15,
                     help="Push a dataset snapshot to HF after this many videos.")
+    ap.add_argument("--legacy-replace-push", action="store_true",
+                    help="Use legacy push_snapshot() (REPLACES the repo's "
+                         "train split every push). Default is push_additive() "
+                         "which uploads only new videos as a new split shard.")
     ap.add_argument("--inter-video-sleep", type=float, default=8.0,
                     help="Seconds to sleep between successful videos "
                          "(gentle pacing to avoid YouTube rate limits).")
@@ -309,6 +452,14 @@ def main() -> int:
     done_fp = out / "done.txt"
     skipped_fp = out / "skipped.jsonl"
     candidates_fp = out / "candidates.jsonl"
+    pushed_fp = out / "pushed.txt"
+
+    def _push(label: str) -> str | None:
+        if args.legacy_replace_push:
+            log(logfp, f"[{label}] push_snapshot (legacy replace mode)")
+            return push_snapshot(staging, args.repo, args.public, logfp)
+        log(logfp, f"[{label}] push_additive")
+        return push_additive(staging, args.repo, args.public, pushed_fp, logfp)
 
     log(logfp, f"=== BULK RUN START target={args.target_hours}h "
                f"repo={args.repo} public={args.public} ===")
@@ -471,7 +622,7 @@ def main() -> int:
 
         if processed_since_push >= args.push_every:
             log(logfp, f"snapshot push after {processed_since_push} videos")
-            url = push_snapshot(staging, args.repo, args.public, logfp)
+            url = _push("snapshot")
             if url:
                 log(logfp, f"  snapshot -> {url}")
             processed_since_push = 0
@@ -481,7 +632,7 @@ def main() -> int:
 
     # Final push.
     log(logfp, f"final push; total hours = {current_hours():.1f}")
-    url = push_snapshot(staging, args.repo, args.public, logfp)
+    url = _push("final")
     if url:
         log(logfp, f"FINAL -> {url}")
 
