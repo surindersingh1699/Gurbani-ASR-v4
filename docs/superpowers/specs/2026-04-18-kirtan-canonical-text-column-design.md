@@ -46,15 +46,17 @@ Defaults: `SIMRAN_DETECT_MIN_REPS = 5`, `SIMRAN_DETECT_RATIO = 0.70`.
 ### Two-stage downsample
 
 **Stage 1 — per-video cap** (maintains voice diversity across the AKJ corpus):
-- For each `video_id`, keep at most `SIMRAN_PER_VIDEO_CAP = 20` simran clips.
+- For each `video_id`, keep at most `SIMRAN_PER_VIDEO_CAP = 5` simran clips.
 - Random sample within the video; do not take the first N (which would cluster at the session start).
 
 **Stage 2 — global cap** (enforces dataset-wide ratio):
 - Compute simran rows remaining after Stage 1.
-- Target: `SIMRAN_TARGET_RATIO = 0.05` (5% of final dataset).
+- Target: `SIMRAN_TARGET_RATIO = 0.01` (1% of final dataset ≈ 600 rows at 60K total).
 - If over, random-downsample to exactly the target, stratified by `video_id` so no video dominates the surviving simran set.
 
 Dropped simran rows are **removed from the dataset**, not flagged. The `is_simran = true` column stays on the surviving rows so training-side samplers can optionally downweight further.
+
+**Why 1%, not 5%**: simran is a single repeated word — ASR models learn repetitive patterns fast, and ~500 rows across ~50-100 distinct voices is enough to generalize. More than that just biases the decoder toward outputting ਵਾਹਿਗੁਰੂ without teaching anything new. If empirical WER on simran turns out too high after training, bump `SIMRAN_TARGET_RATIO` up; easier to add data than un-bias a trained model.
 
 ### Short-circuit (applies to surviving simran rows in the canonical pipeline)
 
@@ -62,9 +64,30 @@ Rows with `is_simran = true` that survive the quota skip both stages of the cano
 
 - Skip STTM retrieval — ਵਾਹਿਗੁਰੂ is not in SGGS (it lives in Bhai Gurdas Vaaran), so retrieval always fails anyway.
 - Skip LLM pass — the text is already correct; sending it to Gemini wastes API calls.
-- Emit: `decision = "simran"`, `sggs_line = null`, `final_text = caption_with_>>_stripped`, `final_text_llm = null`, `llm_verified = null`.
+- Apply waheguru normalization (see below) to produce `final_text`.
+- Emit: `decision = "simran"`, `sggs_line = null`, `final_text = normalized caption`, `final_text_llm = null`, `llm_verified = null`.
 
 New decision value: `simran` — joins `matched / replaced / review / unchanged`.
+
+### Waheguru normalization (hardcoded, always-correct treatment)
+
+ਵਾਹਿਗੁਰੂ is definitionally the correct spelling in Gurmat context. YT captions commonly have matra variants — `ਵਾਹੇਗੁਰੂ`, `ਵਾਹਿਗੁਰ`, `ਵਾਹਿਗੁਰੁ`, `ਵਹਿਗੁਰੂ` — which all collapse to the same consonant skeleton `ਵਹਗਰ`. Any token matching that skeleton is rewritten to the canonical `ਵਾਹਿਗੁਰੂ` with zero LLM involvement.
+
+**Where it applies:**
+1. **Primary target**: simran-decision rows. Every ਵਾਹਿਗੁਰੂ-ish token in the caption becomes the canonical form in `final_text`.
+2. **Secondary pass**: applied to ALL rows' captions after the main pipeline, regardless of decision. Even in the middle of a non-simran clip, a stray `ਵਾਹੇਗੁਰੂ` becomes `ਵਾਹਿਗੁਰੂ`. Cheap safety net.
+
+**Implementation** (tight, deterministic):
+
+```python
+CANONICAL_WAHEGURU = "ਵਾਹਿਗੁਰੂ"
+WAHEGURU_SKEL = skel(CANONICAL_WAHEGURU)  # = "ਵਹਗਰ"
+
+def normalize_waheguru(tokens: list[str]) -> list[str]:
+    return [CANONICAL_WAHEGURU if skel(t) == WAHEGURU_SKEL else t for t in tokens]
+```
+
+Applied unconditionally, runs in microseconds. Zero API cost. No risk of corruption since it's skeleton-exact-match (4 consonants, unique enough — no other common Gurbani word collapses to `ਵਹਗਰ`).
 
 ### Tuneable constants
 
@@ -72,14 +95,15 @@ New decision value: `simran` — joins `matched / replaced / review / unchanged`
 |---|---|---|
 | `SIMRAN_DETECT_MIN_REPS` | 5 | Min consecutive ਵਾਹਿਗੁਰੂ tokens to trigger detection |
 | `SIMRAN_DETECT_RATIO` | 0.70 | Min fraction of clip tokens that must be ਵਾਹਿਗੁਰੂ |
-| `SIMRAN_PER_VIDEO_CAP` | 20 | Max simran clips kept per video |
-| `SIMRAN_TARGET_RATIO` | 0.05 | Target fraction of final dataset that is simran |
+| `SIMRAN_PER_VIDEO_CAP` | 5 | Max simran clips kept per video |
+| `SIMRAN_TARGET_RATIO` | 0.01 | Target fraction of final dataset that is simran |
 
 ### Expected outcome
 
 - Pre-downsample simran count: ~10–15K rows (at 17–25% of 60K) from AKJ alone.
-- Post-downsample: ~2,700 rows (~5% of 60K). Preserves voice diversity via per-video cap; prevents ASR overfit.
-- Logs: `simran_detected=N, after_per_video_cap=N, after_global_cap=N` printed to stderr.
+- Post-downsample: ~600 rows (~1% of 60K). Preserves voice diversity via per-video cap; avoids ASR bias toward ਵਾਹਿਗੁਰੂ output.
+- Waheguru normalization: ~5–10% of non-simran rows will have ≥1 matra-variant `ਵਾਹੇਗੁਰੂ`-style token that gets canonicalized in `final_text`.
+- Logs: `simran_detected=N, after_per_video_cap=N, after_global_cap=N, waheguru_normalized=N` printed to stderr.
 
 ## 2. Inputs & outputs
 
