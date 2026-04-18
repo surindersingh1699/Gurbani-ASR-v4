@@ -31,6 +31,56 @@ Implementation: add as Phase −1 in `scripts/add_canonical_column.py`, before a
 
 **Expected drop rate** (from inspecting the sample data): ~5–10% of rows — worth removing before the expensive STTM + Gemini passes, and avoids polluting the training set with meaningless clips.
 
+## 1.6 Simran quota (runs AFTER §1.5, BEFORE the canonical pipeline)
+
+AKJ kirtan videos include long ਵਾਹਿਗੁਰੂ simran sessions. Simran is a real sung pattern, not a transcription error — so it shouldn't be "fixed" or flagged — but at raw ingest volumes it will dominate the dataset and bias the ASR decoder toward always outputting ਵਾਹਿਗੁਰੂ when uncertain. Left unchecked, AKJ simran could easily be 17–25% of the final dataset.
+
+### Detection
+
+A row is marked `is_simran = true` if:
+- It contains ≥ `SIMRAN_DETECT_MIN_REPS` consecutive `ਵਾਹਿਗੁਰੂ` tokens, AND
+- Those tokens are > `SIMRAN_DETECT_RATIO` of the clip's Gurmukhi tokens.
+
+Defaults: `SIMRAN_DETECT_MIN_REPS = 5`, `SIMRAN_DETECT_RATIO = 0.70`.
+
+### Two-stage downsample
+
+**Stage 1 — per-video cap** (maintains voice diversity across the AKJ corpus):
+- For each `video_id`, keep at most `SIMRAN_PER_VIDEO_CAP = 20` simran clips.
+- Random sample within the video; do not take the first N (which would cluster at the session start).
+
+**Stage 2 — global cap** (enforces dataset-wide ratio):
+- Compute simran rows remaining after Stage 1.
+- Target: `SIMRAN_TARGET_RATIO = 0.05` (5% of final dataset).
+- If over, random-downsample to exactly the target, stratified by `video_id` so no video dominates the surviving simran set.
+
+Dropped simran rows are **removed from the dataset**, not flagged. The `is_simran = true` column stays on the surviving rows so training-side samplers can optionally downweight further.
+
+### Short-circuit (applies to surviving simran rows in the canonical pipeline)
+
+Rows with `is_simran = true` that survive the quota skip both stages of the canonical pipeline:
+
+- Skip STTM retrieval — ਵਾਹਿਗੁਰੂ is not in SGGS (it lives in Bhai Gurdas Vaaran), so retrieval always fails anyway.
+- Skip LLM pass — the text is already correct; sending it to Gemini wastes API calls.
+- Emit: `decision = "simran"`, `sggs_line = null`, `final_text = caption_with_>>_stripped`, `final_text_llm = null`, `llm_verified = null`.
+
+New decision value: `simran` — joins `matched / replaced / review / unchanged`.
+
+### Tuneable constants
+
+| Constant | Default | Purpose |
+|---|---|---|
+| `SIMRAN_DETECT_MIN_REPS` | 5 | Min consecutive ਵਾਹਿਗੁਰੂ tokens to trigger detection |
+| `SIMRAN_DETECT_RATIO` | 0.70 | Min fraction of clip tokens that must be ਵਾਹਿਗੁਰੂ |
+| `SIMRAN_PER_VIDEO_CAP` | 20 | Max simran clips kept per video |
+| `SIMRAN_TARGET_RATIO` | 0.05 | Target fraction of final dataset that is simran |
+
+### Expected outcome
+
+- Pre-downsample simran count: ~10–15K rows (at 17–25% of 60K) from AKJ alone.
+- Post-downsample: ~2,700 rows (~5% of 60K). Preserves voice diversity via per-video cap; prevents ASR overfit.
+- Logs: `simran_detected=N, after_per_video_cap=N, after_global_cap=N` printed to stderr.
+
 ## 2. Inputs & outputs
 
 ### Input: existing HF dataset schema (current)
