@@ -1,25 +1,44 @@
 #!/usr/bin/env python3
-"""Pilot: YouTube audio + pa-orig auto-captions -> fixed 20s FLAC clips -> HF dataset.
+"""Build an (audio, text) training dataset from a YouTube video's own pa-orig
+auto-captions. Defaults reproduce YouTube's transcript-panel lines exactly.
 
-Hypothesis: YouTube's `pa-orig` Punjabi auto-caption is usable as a noisy label
-if we slice the audio into fixed 20s windows and drop instrumental-only windows
-(captioned `[sangit]` / `[Music]` / similar by YouTube).
+See `memory/feedback_yt_caption_pipeline.md` for the full rationale and the
+two non-obvious rules that make this work.
 
-Pipeline:
-  1. yt-dlp: download FLAC (16 kHz mono) + `pa-orig` json3 captions
-  2. Slice audio into fixed 20s windows [0,20), [20,40), ...
-     Final partial window: pad to 20s if >=5s else drop.
-  3. For each window, concat pa-orig cues whose MIDPOINT falls in [start,end).
-  4. Drop a window if — after stripping `[bracketed]` sound-tags, `॥`/`॥੧॥`
-     verse markers, and whitespace — nothing is left.
-  5. Write manifest.jsonl (kept) + dropped.jsonl (audit trail).
-  6. Optionally push to a private HF dataset for inspection.
+Default pipeline (clip-mode=caption, caption-offset-s=0):
 
-Example:
+  1. yt-dlp: download audio in its NATIVE format (opus in webm, or m4a) —
+     NOT re-encoded to FLAC at download time. Re-encoding at download
+     introduces a ~0.04% linear drift vs YouTube's player timeline.
+     Also grabs `pa-orig` json3 captions.
+  2. Build clip boundaries to match YouTube's UI transcript panel:
+        - filter pa-orig events to CONTENT-only (drop `[ਸੰਗੀਤ]`/
+          `[Music]`/etc. sound-tag events)
+        - group contiguous content events (gap < 2s) so pairs never
+          bridge a music break
+        - pair consecutive content events (0,1), (2,3), … within each
+          group — each pair is one UI transcript line / one clip
+        - cap each clip's end at the next clip's start for non-overlap
+  3. Per clip: ffmpeg slices from native webm, resamples to 16 kHz mono,
+     encodes FLAC. Because ffmpeg decodes opus honouring container
+     timestamps, the clip audio aligns to the caption `tStartMs` exactly.
+  4. Write manifest.jsonl + dropped.jsonl + summary.txt.
+  5. Optionally push to HF with an `audio` column so clips are playable
+     inline in the Hub preview.
+
+Legacy mode: `--clip-mode fixed --window-s 20` keeps the earlier fixed-
+window behaviour for comparison/debugging.
+
+Example (run from repo root, after `set -a; source .env; set +a`):
     python scripts/pilot_yt_caption_chunks.py \\
         --video-id goHzUu4v8mU \\
-        --out /root/v3_data/pilot_yt_captions \\
-        --repo surindersinghssj/gurbani-yt-caption-pilot
+        --out /tmp/ytpilot \\
+        --repo surindersinghssj/gurbani-yt-caption-pilot --public \\
+        --pot-provider ""      # keep default URL on Hetzner instead
+
+Validated on goHzUu4v8mU (2026-04-18): caption-mode clip boundaries matched
+all 14 visible UI transcript-panel timestamps exactly (0:02 … 1:52), and
+text coalescing matched the UI to the character.
 """
 from __future__ import annotations
 
@@ -77,27 +96,112 @@ def parse_json3(path: Path):
         yield start, start + dur, text
 
 
+def build_ui_transcript_lines(cues: list[tuple[float, float, str]],
+                              group_gap_s: float = 2.0,
+                              duration: float | None = None
+                              ) -> list[tuple[float, float, str, int]]:
+    """Reproduce YouTube's transcript-panel line coalescing.
+
+    YouTube's transcript UI pairs consecutive pa-orig events into "reading
+    units" — the text the viewer sees on one line. We replicate that rule:
+      1. Filter to CONTENT events (text remains after stripping
+         `[bracketed]` sound-tags and `॥`/`॥੧॥` verse markers).
+      2. Group contiguous content events (gap < `group_gap_s`); reset
+         grouping across long music/silence breaks so the pairing does not
+         bridge a sound-tag gap and produce a weird 30s clip.
+      3. Within each group, pair events (0,1), (2,3), ... Odd trailing event
+         is a standalone 1-event clip.
+      4. `start = first.tStart`, text = first.text + " " + second.text.
+         `end = second.end` (or standalone event's end), then cap at the
+         next clip's start for clean non-overlapping tiling.
+
+    Validated against the UI transcript panel on `goHzUu4v8mU`: all 14
+    visible UI timestamps (0:02 … 1:52) match exactly. See
+    memory/feedback_yt_caption_offset.md.
+
+    Returns a list of (start_s, end_s, text, n_cues) tuples.
+    """
+    content = [(s, e, t) for (s, e, t) in cues
+               if strip_for_drop_check(t)]
+
+    if not content:
+        return []
+
+    groups: list[list[tuple[float, float, str]]] = [[content[0]]]
+    for ev in content[1:]:
+        if ev[0] - groups[-1][-1][1] < group_gap_s:
+            groups[-1].append(ev)
+        else:
+            groups.append([ev])
+
+    clips: list[tuple[float, float, str, int]] = []
+    for g in groups:
+        i = 0
+        while i < len(g):
+            if i + 1 < len(g):
+                a = g[i]
+                b = g[i + 1]
+                text = f"{a[2]} {b[2]}"
+                clips.append((a[0], b[1], text, 2))
+                i += 2
+            else:
+                a = g[i]
+                clips.append((a[0], a[1], a[2], 1))
+                i += 1
+
+    # Cap each clip's end at the next clip's start so audio tiles cleanly
+    # without overlap (also matches the UI — each line plays until the next).
+    for i in range(len(clips) - 1):
+        s, e, t, n = clips[i]
+        ns = clips[i + 1][0]
+        if ns < e:
+            clips[i] = (s, ns, t, n)
+
+    # Cap the final clip at the master duration if known.
+    if duration is not None and clips:
+        s, e, t, n = clips[-1]
+        if e > duration:
+            clips[-1] = (s, duration, t, n)
+
+    return clips
+
+
 def run(cmd: list[str], **kw) -> subprocess.CompletedProcess:
     print("+", " ".join(str(c) for c in cmd), file=sys.stderr)
     return subprocess.run(cmd, check=True, **kw)
 
 
+def _find_master(workdir: Path, video_id: str) -> Path | None:
+    """Return preferred master audio (webm > m4a > flac) if present."""
+    for ext in ("webm", "m4a", "opus", "flac"):
+        p = workdir / f"{video_id}.{ext}"
+        if p.exists():
+            return p
+    return None
+
+
 def download_audio_and_captions(video_id: str, workdir: Path, lang: str,
                                 pot_provider: str | None = None,
                                 cookies: Path | None = None) -> tuple[Path, Path]:
+    """Download audio in NATIVE format (no resample) + pa-orig captions.
+
+    Native format preserves YouTube's exact timeline — opus/webm pre-skip,
+    DASH segments, and variable-rate frames are all handled correctly by
+    ffmpeg at slice time. This is what the player uses, so caption
+    timestamps match audio exactly (offset=0 works).
+    """
     url = f"https://www.youtube.com/watch?v={video_id}"
     workdir.mkdir(parents=True, exist_ok=True)
-    master = workdir / f"{video_id}.flac"
     cap_glob = lambda: sorted(workdir.glob(f"{video_id}.{lang}.*.json3")) + \
                        sorted(workdir.glob(f"{video_id}.{lang}.json3"))
 
-    if master.exists() and cap_glob():
-        return master, cap_glob()[0]
+    existing = _find_master(workdir, video_id)
+    if existing and cap_glob():
+        return existing, cap_glob()[0]
 
     cmd = [
         "yt-dlp",
-        "-x", "--audio-format", "flac",
-        "--postprocessor-args", "ffmpeg:-ar 16000 -ac 1",
+        "-f", "bestaudio[ext=webm]/bestaudio[ext=m4a]/bestaudio",
         "--write-auto-subs",
         "--sub-langs", lang,
         "--sub-format", "json3",
@@ -114,8 +218,9 @@ def download_audio_and_captions(video_id: str, workdir: Path, lang: str,
     caps = cap_glob()
     if not caps:
         raise SystemExit(f"No {lang} captions downloaded for {video_id}")
-    if not master.exists():
-        raise SystemExit(f"Audio FLAC not produced for {video_id}")
+    master = _find_master(workdir, video_id)
+    if not master:
+        raise SystemExit(f"No audio master file produced for {video_id}")
     return master, caps[0]
 
 
@@ -148,7 +253,8 @@ def slice_clip(master: Path, out: Path, start_s: float, dur_s: float,
 
 
 def build_summary(video_id: str, duration: float, kept: list[dict],
-                  dropped: list[dict], seed: int = 42) -> str:
+                  dropped: list[dict], caption_offset_s: float = 0.0,
+                  seed: int = 42) -> str:
     total = len(kept) + len(dropped)
     rng = random.Random(seed)
     lines = []
@@ -156,6 +262,8 @@ def build_summary(video_id: str, duration: float, kept: list[dict],
     p("================ PILOT SUMMARY ================")
     p(f"Video            : {video_id}")
     p(f"Duration         : {duration:.0f}s ({duration/60:.1f} min)")
+    p(f"Caption offset   : {caption_offset_s:+.3f}s "
+      f"(applied to cue midpoint before window assignment)")
     p(f"Total windows    : {total}")
     if total:
         p(f"Kept             : {len(kept)}  ({len(kept)/total*100:.1f}%)")
@@ -194,7 +302,10 @@ def push_to_hf(repo: str, workdir: Path, manifest: list[dict],
             "clip_id": m["clip_id"],
             "start_s": m["start_s"],
             "end_s": m["end_s"],
+            "duration_s": m.get("duration_s", m["end_s"] - m["start_s"]),
             "n_cues": m["n_cues"],
+            "clip_mode": m.get("clip_mode", "fixed"),
+            "caption_offset_s": m.get("caption_offset_s", 0.0),
             "video_id": video_id,
             "caption_lang": lang,
         })
@@ -241,6 +352,16 @@ def main() -> int:
     ap.add_argument("--window-s", type=float, default=20.0)
     ap.add_argument("--min-tail-s", type=float, default=5.0,
                     help="Drop final partial window if shorter than this; else pad.")
+    ap.add_argument("--clip-mode", choices=["fixed", "caption"],
+                    default="caption",
+                    help="'caption' (default): one clip per YouTube UI "
+                         "transcript-panel line (variable length, pair "
+                         "consecutive content events). 'fixed': legacy "
+                         "fixed-window mode using --window-s.")
+    ap.add_argument("--caption-offset-s", type=float, default=0.0,
+                    help="Seconds to add to every cue time before window "
+                         "assignment (fixed mode only). With native-webm "
+                         "download pipeline, 0 is correct — no drift.")
     ap.add_argument("--pot-provider", default="http://127.0.0.1:4416",
                     help="yt-dlp PO-token provider URL (empty = disable).")
     ap.add_argument("--cookies", type=Path, default=Path("/root/cookies.txt"))
@@ -266,50 +387,98 @@ def main() -> int:
     print(f"[info] duration={duration:.1f}s  cues={len(cues)}  caption={cap_path.name}",
           file=sys.stderr)
 
-    W = args.window_s
-    n_full = int(duration // W)
-    tail = duration - n_full * W
-    include_tail = tail >= args.min_tail_s
-    n_windows = n_full + (1 if include_tail else 0)
-
-    buckets: list[list[tuple[float, float, str]]] = [[] for _ in range(n_windows)]
-    for cstart, cend, ctext in cues:
-        mid = (cstart + cend) / 2.0
-        idx = int(mid // W)
-        if 0 <= idx < n_windows:
-            buckets[idx].append((cstart, cend, ctext))
-
     kept: list[dict] = []
     dropped: list[dict] = []
-    for i, bucket in enumerate(buckets):
-        start = i * W
-        nominal_end = min(start + W, duration)
-        raw_text = " ".join(t for _, _, t in sorted(bucket)).strip()
-        cleaned = strip_for_drop_check(raw_text)
-        if not cleaned:
-            dropped.append({
-                "window_idx": i,
+    offset = args.caption_offset_s
+
+    if args.clip_mode == "caption":
+        lines = build_ui_transcript_lines(cues, duration=duration)
+        print(f"[info] caption mode: {len(lines)} UI transcript lines",
+              file=sys.stderr)
+        for i, (start, end, raw_text, n_cues) in enumerate(lines):
+            cleaned = strip_for_drop_check(raw_text)
+            if not cleaned:
+                dropped.append({
+                    "window_idx": i,
+                    "start_s": round(start, 3),
+                    "end_s": round(end, 3),
+                    "raw_text": raw_text,
+                    "drop_reason": "sound_tag_only" if raw_text else "empty",
+                    "n_cues": n_cues,
+                })
+                continue
+            clip_name = f"clip_{i:05d}.flac"
+            clip_path = clips_dir / clip_name
+            dur_s = end - start
+            if dur_s <= 0.05:
+                dropped.append({
+                    "window_idx": i,
+                    "start_s": round(start, 3),
+                    "end_s": round(end, 3),
+                    "raw_text": raw_text,
+                    "drop_reason": "zero_duration",
+                    "n_cues": n_cues,
+                })
+                continue
+            slice_clip(master, clip_path, start, dur_s, pad_to_s=None)
+            kept.append({
+                "clip_id": f"{args.video_id}_clip_{i:05d}",
+                "audio_path": f"clips/{clip_name}",
+                "start_s": round(start, 3),
+                "end_s": round(end, 3),
+                "duration_s": round(dur_s, 3),
+                "text": normalize_kept(raw_text),
+                "raw_text": raw_text,
+                "n_cues": n_cues,
+                "caption_offset_s": offset,
+                "clip_mode": "caption",
+            })
+    else:
+        W = args.window_s
+        n_full = int(duration // W)
+        tail = duration - n_full * W
+        include_tail = tail >= args.min_tail_s
+        n_windows = n_full + (1 if include_tail else 0)
+
+        buckets: list[list[tuple[float, float, str]]] = [[] for _ in range(n_windows)]
+        for cstart, cend, ctext in cues:
+            mid = (cstart + cend) / 2.0 + offset
+            idx = int(mid // W)
+            if 0 <= idx < n_windows:
+                buckets[idx].append((cstart, cend, ctext))
+
+        for i, bucket in enumerate(buckets):
+            start = i * W
+            nominal_end = min(start + W, duration)
+            raw_text = " ".join(t for _, _, t in sorted(bucket)).strip()
+            cleaned = strip_for_drop_check(raw_text)
+            if not cleaned:
+                dropped.append({
+                    "window_idx": i,
+                    "start_s": round(start, 3),
+                    "end_s": round(nominal_end, 3),
+                    "raw_text": raw_text,
+                    "drop_reason": "sound_tag_only" if raw_text else "empty",
+                    "n_cues": len(bucket),
+                })
+                continue
+            clip_name = f"clip_{i:05d}.flac"
+            clip_path = clips_dir / clip_name
+            dur_s = nominal_end - start
+            pad_to = W if (i == n_full and include_tail and dur_s < W) else None
+            slice_clip(master, clip_path, start, dur_s, pad_to_s=pad_to)
+            kept.append({
+                "clip_id": f"{args.video_id}_clip_{i:05d}",
+                "audio_path": f"clips/{clip_name}",
                 "start_s": round(start, 3),
                 "end_s": round(nominal_end, 3),
+                "duration_s": round(dur_s, 3),
+                "text": normalize_kept(raw_text),
                 "raw_text": raw_text,
-                "drop_reason": "sound_tag_only" if raw_text else "empty",
                 "n_cues": len(bucket),
+                "caption_offset_s": offset,
+                "clip_mode": "fixed",
             })
-            continue
-        clip_name = f"clip_{i:05d}.flac"
-        clip_path = clips_dir / clip_name
-        dur_s = nominal_end - start
-        pad_to = W if (i == n_full and include_tail and dur_s < W) else None
-        slice_clip(master, clip_path, start, dur_s, pad_to_s=pad_to)
-        kept.append({
-            "clip_id": f"{args.video_id}_clip_{i:05d}",
-            "audio_path": f"clips/{clip_name}",
-            "start_s": round(start, 3),
-            "end_s": round(nominal_end, 3),
-            "text": normalize_kept(raw_text),
-            "raw_text": raw_text,
-            "n_cues": len(bucket),
-        })
 
     (workdir / "manifest.jsonl").write_text(
         "\n".join(json.dumps(m, ensure_ascii=False) for m in kept) + "\n",
@@ -320,7 +489,8 @@ def main() -> int:
         encoding="utf-8",
     )
 
-    summary = build_summary(args.video_id, duration, kept, dropped, seed=args.seed)
+    summary = build_summary(args.video_id, duration, kept, dropped,
+                            caption_offset_s=offset, seed=args.seed)
     (workdir / "summary.txt").write_text(summary + "\n", encoding="utf-8")
     print(summary)
 
