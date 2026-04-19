@@ -1,4 +1,4 @@
-"""Gemini 3.1 Pro LLM fallback pass. Runs ONLY on rows with decision
+"""Gemini 2.5 Flash Lite LLM fallback pass. Runs ONLY on rows with decision
 IN (unchanged, review). Emits final_text_llm, llm_model, llm_verified.
 """
 from __future__ import annotations
@@ -29,7 +29,7 @@ correct matras. Do not invent words.
 
 @dataclass
 class LLMConfig:
-    model: str = "gemini-3.1-pro-preview"
+    model: str = "gemini-2.5-flash-lite"
     batch_size: int = 30
     temperature: float = 0.0
     max_output_tokens: int = 12000

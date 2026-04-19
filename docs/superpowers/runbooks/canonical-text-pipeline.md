@@ -43,7 +43,7 @@ python3 scripts/llm_canonical_pass.py \
   --llm-sidecar    /tmp/kirtan-llm.parquet \
   --dataset kirtan \
   --db database.sqlite \
-  --model gemini-3.1-pro-preview \
+  --model gemini-2.5-flash-lite \
   --batch-size 30
 ```
 
