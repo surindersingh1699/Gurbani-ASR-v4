@@ -1,7 +1,7 @@
 # Kirtan Canonical Text Column — Design
 
 **Date:** 2026-04-18
-**Status:** Spec (awaiting user review)
+**Status:** Implemented (see `scripts/canonical/`, `tests/canonical/`, runbook at `docs/superpowers/runbooks/canonical-text-pipeline.md`)
 **Target dataset:** `surindersinghssj/gurbani-kirtan-yt-captions-300h` (HF)
 **Source of truth:** local STTM `database.sqlite` (ShabadOS, 141,264 lines, SGGS + Dasam + Bhai Gurdas + Nand Lal etc.)
 **Depends on (blockers, must ship first):**
