@@ -18,7 +18,8 @@ _NUKTA_PAIRS = [
     ("ਜ਼", "ਜ"), ("ਫ਼", "ਫ"), ("ਲ਼", "ਲ"),
 ]
 
-VISHRAAM_TOKEN_RE = re.compile(r"^[॥।੦-੯0-9.,;:!?'\"()\[\]]+$")
+_VISHRAAM_TOKEN_RE = re.compile(r"^[॥।੦-੯0-9.,;:!?'\"()\[\]]+$")
+VISHRAAM_TOKEN_RE = _VISHRAAM_TOKEN_RE
 
 
 def _denukta(text: str) -> str:
