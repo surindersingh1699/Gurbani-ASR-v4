@@ -1,0 +1,15 @@
+[project]
+name = "gurbani-asr-v4"
+version = "0.1.0"
+description = "Gurbani ASR v4 — dataset + training pipeline"
+requires-python = ">=3.10"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-mock>=3.12",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]

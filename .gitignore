@@ -49,3 +49,8 @@ index/
 # Logs
 *.log
 logs/
+
+# Canonical-text pipeline artifacts
+canonical_audit.parquet
+canonical_llm.parquet
+review_decisions.csv
