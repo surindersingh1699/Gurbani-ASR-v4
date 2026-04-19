@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# DEPRECATED: kept for regression reference only.
+# Production code lives at scripts/canonical/ and is tested in tests/canonical/.
 """Run v2 DB pipeline + Gemini 3.1 Pro LLM fallback on a sample file.
 
 Usage: python3 scripts/proto_run_file.py /tmp/new_sample.txt

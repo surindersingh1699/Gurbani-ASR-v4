@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# DEPRECATED: kept for regression reference only.
+# Production code lives at scripts/canonical/ and is tested in tests/canonical/.
 """Prototype: test canonical-text algorithm on a caption sample.
 
 Not the final shipping pipeline — a minimal impl of the design in

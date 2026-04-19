@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# DEPRECATED: kept for regression reference only.
+# Production code lives at scripts/canonical/ and is tested in tests/canonical/.
 """Prototype v2: all 4 fixes.
 
 Fix 1: full monotonic Needleman-Wunsch DP (replaces greedy).

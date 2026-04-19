@@ -1,0 +1,39 @@
+# Kirtan eval set manifest — v1 picks.
+# Each source contributes its full duration to the corresponding style split.
+# Total target: ~45 min across 3 buckets (10 + 24 + 10).
+#
+# Sources are deliberately chosen from the major style families so the eval
+# tells us whether the model generalizes across kirtan acoustics, not just
+# whether it overfit one source.
+#
+# To add max_duration_sec back later, set it under a source like:
+#   max_duration_sec: 600   # trim to first 10 min
+
+sources:
+  - style: ragi
+    url: https://play.sikhnet.com/track/aakhan-jeeva-visre-mar-jao
+    title: "Aakhan Jeeva Visre Mar Jao — Bhai Harjinder Singh (Srinagar)"
+    notes: |
+      Classical ragi style, well-known shabad, clear vocals (~10:37).
+      Source: SikhNet Play (cleaner than YouTube re-uploads).
+
+  - style: akj
+    url: https://www.youtube.com/watch?v=CKd_cEKfOPw
+    title: "Akhand Keertan — Bhai Amandeep Singh Ludhiana, Paonta Sahib Smaagam 27Mar2026"
+    notes: |
+      AKJ rainsbai style — congregational, slower tempo, less instrumentation (~24min).
+      Source: AKJ.org official YouTube playlist.
+
+  - style: sgpc
+    url: https://www.youtube.com/watch?v=M2QxK95s8lI
+    title: "Har Jas Re Mana Gae Le — Bhai Gurbachan Singh, Hazoori Ragi, Sri Darbar Sahib"
+    notes: |
+      Live SGPC darbar recording, hazoori ragi, classical raag setting (~10:07).
+      Source: SGPC Sri Amritsar official channel.
+
+settings:
+  segment_secs: 20            # fixed clip length (we control timestamps)
+  batch_size: 15              # clips per Gemini API call (~5min audio/call)
+  snap_threshold: 0.85        # min cosine sim to replace Gemini text with canonical SGGS tuk
+  cache_dir: /tmp/kirtan_eval # holds downloaded wavs + raw transcriptions for resume
+  out_dataset: surindersinghssj/gurbani-kirtan-eval-v1

@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# DEPRECATED: kept for regression reference only.
+# Production code lives at scripts/canonical/ and is tested in tests/canonical/.
 """Compare Gemini 3 Flash vs Gemini 3.1 Pro on the unchanged/review rows from v2.
 
 Shares the v2 pipeline + verify logic from proto_llm_pass.py.

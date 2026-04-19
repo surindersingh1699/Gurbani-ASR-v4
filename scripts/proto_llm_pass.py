@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# DEPRECATED: kept for regression reference only.
+# Production code lives at scripts/canonical/ and is tested in tests/canonical/.
 """Prototype: LLM fallback pass on unchanged/review rows from v2 pipeline.
 
 Groups rows by retrieved shabad_id, batches 30 per Gemini call, verifies each

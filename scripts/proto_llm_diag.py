@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# DEPRECATED: kept for regression reference only.
+# Production code lives at scripts/canonical/ and is tested in tests/canonical/.
 """Diagnostic: run the CEF batch=23 case and dump prompt size, raw response,
 and Gemini usage metadata. Tells us exactly why/how truncation happened.
 """
