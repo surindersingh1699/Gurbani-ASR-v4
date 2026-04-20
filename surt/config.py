@@ -102,7 +102,15 @@ SEHAJ_EVAL_DATASET_NAME = "surindersinghssj/gurbani-sehajpath-yt-captions-eval-c
 KIRTAN_EVAL_DATASET_NAME = "surindersinghssj/gurbani-kirtan-eval-pure-canonical"
 
 TRAIN_SPLIT = "train"
-VAL_SPLIT = "validation"   # Split name used inside each eval dataset repo
+VAL_SPLIT = "validation"   # Legacy default — used only if dataset-specific override below is None
+
+# v3 eval splits: sehaj eval repo uses "train" (the eval corpus is its only split);
+# kirtan eval repo has "eval" + "test". TRAINING ONLY EVER USES THE `eval` SPLIT.
+# The `test` split is reserved for final post-training reporting and MUST NOT be
+# read during training — doing so would leak the holdout and inflate reported WER.
+SEHAJ_EVAL_SPLIT = "train"
+KIRTAN_EVAL_SPLIT = "eval"
+
 TEXT_COLUMN = "final_text"  # Canonical v3 text column (primary sehaj, aux kirtan, both evals)
 VAL_SIZE = 400             # ≈1h of sehaj eval (~10s avg clips)
 SHUFFLE_BUFFER = 8000      # Needs to span multiple shards at 190k-clip scale

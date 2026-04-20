@@ -72,12 +72,14 @@ from surt.config import (
     GRAD_ACCUM,
     HF_MODEL_REPO,
     KIRTAN_EVAL_DATASET_NAME,
+    KIRTAN_EVAL_SPLIT,
     LEARNING_RATE,
     MAX_STEPS,
     OUTPUT_DIR,
     SAVE_STEPS,
     SAVE_TOTAL_LIMIT,
     SEHAJ_EVAL_DATASET_NAME,
+    SEHAJ_EVAL_SPLIT,
     TRAINING_HUB_REPO,
     WANDB_ENTITY,
     WANDB_PROJECT,
@@ -596,7 +598,12 @@ def run_training_job(
     # v3: eval datasets live in separate Hub repos (SEHAJ_EVAL_DATASET_NAME,
     # KIRTAN_EVAL_DATASET_NAME). The training datasets (DATASET_NAME /
     # AUX_TRAIN_DATASET_NAME) are NOT used for eval — that would be a data leak.
-    val_dataset = get_val_dataset(SEHAJ_EVAL_DATASET_NAME, processor)
+    # Kirtan eval repo has `eval` + `test` splits — training ONLY reads `eval`
+    # (KIRTAN_EVAL_SPLIT="eval"). The `test` split is reserved for post-training
+    # reporting and must never be touched during training.
+    val_dataset = get_val_dataset(
+        SEHAJ_EVAL_DATASET_NAME, processor, split=SEHAJ_EVAL_SPLIT
+    )
 
     # If aux training is enabled, we evaluate on both splits (sehaj + kirtan).
     # Otherwise just sehaj.
@@ -604,7 +611,9 @@ def run_training_job(
     if aux_dataset_name:
         eval_dataset = {"sehaj_path": val_dataset}
         try:
-            kirtan_val = get_kirtan_val_dataset(KIRTAN_EVAL_DATASET_NAME, processor)
+            kirtan_val = get_kirtan_val_dataset(
+                KIRTAN_EVAL_DATASET_NAME, processor, split=KIRTAN_EVAL_SPLIT
+            )
             eval_dataset["kirtan"] = kirtan_val
         except Exception as e:
             print(f"[train] WARNING: kirtan val set unavailable: {e}. Evaluating sehaj_path only.")
