@@ -61,6 +61,14 @@ from surt.config import (
 # --- Column names ---
 AUDIO_COLUMN = "audio"
 
+# --- Parallelism knobs ---
+# Non-streaming .filter() defaults to single-threaded, which pegs 1 CPU core
+# while the rest idle. For the 207k-row sehaj + 500k-row kirtan train tables,
+# that's ~60 min of single-core CPU time. num_proc=8 fans out via
+# multiprocessing and brings it down to ~8 min. Override via
+# SURT_FILTER_WORKERS=N; set to 1 to disable parallel filter.
+_FILTER_WORKERS = max(1, int(os.environ.get("SURT_FILTER_WORKERS", "8")))
+
 # --- Augmentation pipeline (training only) ---
 # Applied to raw waveform BEFORE feature extraction.
 # v3 tuning — kirtan is tonal/rhythmic content where pitch/tempo distortion
@@ -302,7 +310,7 @@ def get_train_dataset(
     ds = _load_dataset_with_retry(dataset_name, split=split, streaming=False)
     ds = ds.cast_column(AUDIO_COLUMN, Audio(sampling_rate=16000))
     _pre_filter_n = len(ds)
-    ds = ds.filter(label_fits_primary)
+    ds = ds.filter(label_fits_primary, num_proc=_FILTER_WORKERS)
     _dropped = _pre_filter_n - len(ds)
     if _dropped:
         print(
@@ -333,7 +341,8 @@ def get_train_dataset(
 
             _extra_pre = len(ds_extra)
             ds_extra = ds_extra.filter(
-                _make_label_fits_filter(processor, text_column, GENERATION_MAX_LENGTH)
+                _make_label_fits_filter(processor, text_column, GENERATION_MAX_LENGTH),
+                num_proc=_FILTER_WORKERS,
             )
             _extra_dropped = _extra_pre - len(ds_extra)
             if _extra_dropped:
@@ -371,11 +380,14 @@ def get_train_dataset(
             ds_aux = _load_dataset_with_retry(aux_dataset_name, split=split, streaming=False)
             ds_aux = ds_aux.cast_column(AUDIO_COLUMN, Audio(sampling_rate=16000))
             # Filter to ≤30s — longer segments degrade training quality
-            ds_aux = ds_aux.filter(lambda x: x.get("duration", 0) <= 30)
+            ds_aux = ds_aux.filter(
+                lambda x: x.get("duration", 0) <= 30, num_proc=_FILTER_WORKERS
+            )
             # Canonical kirtan exposes TEXT_COLUMN directly — no column rename.
             _aux_pre_n = len(ds_aux)
             ds_aux = ds_aux.filter(
-                _make_label_fits_filter(processor, text_column, GENERATION_MAX_LENGTH)
+                _make_label_fits_filter(processor, text_column, GENERATION_MAX_LENGTH),
+                num_proc=_FILTER_WORKERS,
             )
             _aux_dropped = _aux_pre_n - len(ds_aux)
             if _aux_dropped:
