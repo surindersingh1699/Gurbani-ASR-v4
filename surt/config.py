@@ -113,7 +113,11 @@ KIRTAN_EVAL_SPLIT = "eval"
 
 TEXT_COLUMN = "final_text"  # Canonical v3 text column (primary sehaj, aux kirtan, both evals)
 VAL_SIZE = 400             # ≈1h of sehaj eval (~10s avg clips)
-SHUFFLE_BUFFER = 8000      # Needs to span multiple shards at 190k-clip scale
+SHUFFLE_BUFFER = 500       # Streaming-only buffer (smoke uses streaming).
+                           # Non-streaming full runs use full-permutation shuffle,
+                           # so this value is ignored there. 8000 was too large
+                           # for streaming smoke — it forced a 20-30 min buffer
+                           # fill before step 0.
 
 # --- Weights & Biases ---
 # Auto-enabled when WANDB_API_KEY is set in environment.
