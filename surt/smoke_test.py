@@ -18,7 +18,7 @@ from surt.config import (
     DATASET_NAME,
     GENERATION_MAX_LENGTH,
     TEXT_COLUMN,
-    VAL_SPLIT,
+    TRAIN_SPLIT,
 )
 from surt.data import DataCollatorSpeechSeq2SeqWithPadding, get_train_dataset
 from surt.model import get_mool_mantar_prompt_ids
@@ -58,7 +58,7 @@ def run_generation_preflight(
     model,
     processor,
     dataset_name: str = DATASET_NAME,
-    split: str = VAL_SPLIT,
+    split: str = TRAIN_SPLIT,
 ) -> str:
     """TEST-01: generate one sample and enforce Gurmukhi output sanity."""
     example = _load_first_raw_example(dataset_name, split)
@@ -108,7 +108,7 @@ def run_batch_preflight(
     dataset_name: str = DATASET_NAME,
 ) -> None:
     """TEST-02: validate 16kHz, -100 padding mask, and BOS behavior."""
-    raw_example = _load_first_raw_example(dataset_name, VAL_SPLIT)
+    raw_example = _load_first_raw_example(dataset_name, TRAIN_SPLIT)
     raw_sr = raw_example[AUDIO_COLUMN]["sampling_rate"]
     if raw_sr != 16000:
         raise AssertionError(f"TEST-02 failed: expected 16kHz, got {raw_sr}")
