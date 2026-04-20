@@ -25,10 +25,34 @@ import torch
 from huggingface_hub import HfApi
 from torch.optim import AdamW
 
-# Disable cuDNN — the bundled cuDNN 9.19 fails to initialize on some RunPod
-# images (CUDNN_STATUS_NOT_INITIALIZED). CUDA conv fallback is ~5% slower but
-# rock-solid. Safe to remove once the pod image ships a compatible cuDNN.
-torch.backends.cudnn.enabled = False
+# cuDNN gate. Historically disabled because cuDNN 9.19 on some RunPod images
+# failed with CUDNN_STATUS_NOT_INITIALIZED. On pods where cuDNN initializes
+# cleanly, keeping it on is a ~20–30% speedup (conv + matmul kernels).
+# Behaviour:
+#   - Try a 1-shot cudnn.init by running a tiny conv on GPU.
+#   - If it errors, fall back to disabled (legacy safe path).
+#   - Override with SURT_DISABLE_CUDNN=1 for manual escape hatch.
+if os.environ.get("SURT_DISABLE_CUDNN", "0") == "1":
+    torch.backends.cudnn.enabled = False
+    print("[train] cuDNN force-disabled via SURT_DISABLE_CUDNN=1")
+elif torch.cuda.is_available():
+    try:
+        torch.backends.cudnn.enabled = True
+        torch.backends.cudnn.benchmark = True  # autotune conv algos for fixed shapes
+        _probe = torch.randn(1, 1, 8, 8, device="cuda")
+        _ = torch.nn.functional.conv2d(_probe, torch.randn(1, 1, 3, 3, device="cuda"))
+        del _probe
+        torch.cuda.synchronize()
+        print("[train] cuDNN enabled (probe OK, benchmark=True)")
+    except Exception as e:
+        torch.backends.cudnn.enabled = False
+        print(f"[train] cuDNN probe failed, disabled: {e}")
+else:
+    torch.backends.cudnn.enabled = False
+
+# TF32 matmuls on Ampere+ (free speedup in bf16/fp32 paths, numerically harmless here).
+if torch.cuda.is_available():
+    torch.set_float32_matmul_precision("high")
 from transformers import Seq2SeqTrainer, Seq2SeqTrainingArguments, TrainerCallback
 from transformers.trainer_utils import get_last_checkpoint
 
@@ -37,17 +61,23 @@ from surt.config import (
     AUX_TRAIN_PROBABILITY,
     BATCH_SIZE,
     DECODER_LR,
+    EARLY_STOP_METRIC,
+    EARLY_STOP_PATIENCE,
     EFFECTIVE_BATCH,
     ENCODER_LR,
     EVAL_STEPS,
+    EXTRA_SEHAJ_DATASET_NAME,
+    EXTRA_SEHAJ_TEXT_COLUMN,
     GENERATION_MAX_LENGTH,
     GRAD_ACCUM,
     HF_MODEL_REPO,
+    KIRTAN_EVAL_DATASET_NAME,
     LEARNING_RATE,
     MAX_STEPS,
     OUTPUT_DIR,
     SAVE_STEPS,
     SAVE_TOTAL_LIMIT,
+    SEHAJ_EVAL_DATASET_NAME,
     TRAINING_HUB_REPO,
     WANDB_ENTITY,
     WANDB_PROJECT,
@@ -58,20 +88,88 @@ from surt.config import (
 # import-time dependency on audiomentations and model loading.
 
 
+class PlateauEarlyStopCallback(TrainerCallback):
+    """Stop training when neither WER nor CER improves for `patience` consecutive evals.
+
+    Watches a single eval split (e.g. "kirtan" or "sehaj_path") — multi-dataset
+    eval fires on_evaluate once per split, and we only act on the matching one.
+    Tracks per-metric best values independently; "improvement" on this eval means
+    either WER or CER beat its own best. If BOTH stayed flat-or-worse for
+    `patience` evals in a row, signal the trainer to stop.
+
+    Env overrides:
+      - SURT_EARLY_STOP_METRIC ("kirtan" | "sehaj_path" | "none") — split to watch
+      - SURT_EARLY_STOP_PATIENCE (int) — how many stale evals before stopping
+    """
+
+    def __init__(self, split_name: str, patience: int):
+        super().__init__()
+        self.split_name = split_name
+        self.patience = patience
+        self.best_wer = float("inf")
+        self.best_cer = float("inf")
+        self.stale_count = 0
+        self._wer_key = f"eval_{split_name}_wer"
+        self._cer_key = f"eval_{split_name}_cer"
+
+    def on_evaluate(self, args, state, control, metrics=None, **kwargs):
+        if not state.is_world_process_zero or not metrics:
+            return
+        if self._wer_key not in metrics or self._cer_key not in metrics:
+            # Not our split — the other eval dataset fired this call
+            return
+
+        wer = metrics[self._wer_key]
+        cer = metrics[self._cer_key]
+
+        wer_improved = wer < self.best_wer
+        cer_improved = cer < self.best_cer
+        if wer_improved:
+            self.best_wer = wer
+        if cer_improved:
+            self.best_cer = cer
+
+        if wer_improved or cer_improved:
+            self.stale_count = 0
+            print(
+                f"[early-stop] {self.split_name}: improved "
+                f"(WER {wer:.2f} best {self.best_wer:.2f}, "
+                f"CER {cer:.2f} best {self.best_cer:.2f}) — counter reset"
+            )
+            return
+
+        self.stale_count += 1
+        print(
+            f"[early-stop] {self.split_name}: no improvement "
+            f"({self.stale_count}/{self.patience}) — "
+            f"WER {wer:.2f} (best {self.best_wer:.2f}), "
+            f"CER {cer:.2f} (best {self.best_cer:.2f})"
+        )
+        if self.stale_count >= self.patience:
+            print(
+                f"[early-stop] STOP: neither WER nor CER improved on "
+                f"{self.split_name} for {self.patience} consecutive evals"
+            )
+            control.should_training_stop = True
+
+
 class HubPushCallback(TrainerCallback):
-    """Callback for WER-gated and periodic model pushes to HuggingFace Hub.
+    """WER+CER-gated and periodic model pushes to HuggingFace Hub.
 
-    Implements a two-pronged push strategy for checkpoint safety:
-    1. Best push: Upload when WER improves (WER-gated)
-    2. Periodic safety push: Upload every Nth eval regardless of WER
+    Tracks four independent "best" values — WER and CER for both the sehaj
+    and kirtan eval splits. A Hub push fires if ANY of the four metrics
+    improves, plus a periodic safety push every N evals regardless.
 
-    Persists best WER to best_wer.json in OUTPUT_DIR so the metric survives
-    across resume cycles on spot instances.
+    State persists in best_metrics.json under OUTPUT_DIR so all four bests
+    survive spot-instance restarts.
 
     Pushes the full model folder (weights + processor + tokenizer +
     generation_config) to TRAINING_HUB_REPO, making it instantly loadable
     with from_pretrained().
     """
+
+    _SPLITS = ("sehaj_path", "kirtan")
+    _METRICS = ("wer", "cer")
 
     def __init__(
         self,
@@ -87,38 +185,57 @@ class HubPushCallback(TrainerCallback):
         self.push_every_n_evals = push_every_n_evals
         self.eval_count = 0
         self.api = HfApi()
-        self.best_wer_path = self.output_dir / "best_wer.json"
-        self.best_wer = self._load_best_wer()
 
-    def _load_best_wer(self) -> float:
-        """Load persisted best WER from disk, or return inf if not found."""
-        if self.best_wer_path.exists():
-            with open(self.best_wer_path) as f:
+        self.best_path = self.output_dir / "best_metrics.json"
+        # legacy single-WER file — migrate on first run
+        self._legacy_wer_path = self.output_dir / "best_wer.json"
+        self.bests = self._load_bests()  # {split: {wer: float, cer: float, step: int}}
+
+    def _empty_bests(self) -> dict:
+        return {s: {m: float("inf") for m in self._METRICS} | {"step": -1} for s in self._SPLITS}
+
+    def _load_bests(self) -> dict:
+        """Load persisted best metrics, migrating legacy best_wer.json if found."""
+        if self.best_path.exists():
+            with open(self.best_path) as f:
                 data = json.load(f)
-            wer = data.get("best_wer", float("inf"))
-            print(f"[train] Loaded best WER: {wer} from {self.best_wer_path}")
-            return wer
-        print("[train] No previous best WER found, starting fresh")
-        return float("inf")
+            for split in self._SPLITS:
+                data.setdefault(split, {m: float("inf") for m in self._METRICS} | {"step": -1})
+                for m in self._METRICS:
+                    data[split].setdefault(m, float("inf"))
+                data[split].setdefault("step", -1)
+            print(f"[train] Loaded best metrics from {self.best_path}: {data}")
+            return data
 
-    def _save_best_wer(self, wer: float, step: int):
-        """Persist best WER and step to disk for resume survival."""
-        with open(self.best_wer_path, "w") as f:
-            json.dump({"best_wer": wer, "step": step}, f)
+        if self._legacy_wer_path.exists():
+            with open(self._legacy_wer_path) as f:
+                legacy = json.load(f)
+            bests = self._empty_bests()
+            bests["sehaj_path"]["wer"] = legacy.get("best_wer", float("inf"))
+            bests["sehaj_path"]["step"] = legacy.get("step", -1)
+            print(f"[train] Migrated legacy best_wer.json → best_metrics.json: {bests}")
+            return bests
 
-    def _push_to_hub(self, model, step: int, wer: float, cer: float, reason: str):
+        print("[train] No previous best metrics found, starting fresh")
+        return self._empty_bests()
+
+    def _save_bests(self):
+        """Persist all best metrics to disk for resume survival."""
+        with open(self.best_path, "w") as f:
+            json.dump(self.bests, f, indent=2)
+
+    def _push_to_hub(self, model, step: int, reason: str, metrics_blurb: str):
         """Upload model + processor to Hub in a background thread.
 
         Saves weights synchronously (fast, local I/O) then uploads
         asynchronously so training is never blocked by slow Hub uploads.
         """
         try:
-            # Save locally (fast) — use step-specific dir to avoid races
             staging_dir = self.output_dir / f"hub_staging_{step}"
             model.save_pretrained(staging_dir)
             self.processor.save_pretrained(staging_dir)
 
-            commit_msg = f"step {step} | WER {wer:.2f} | CER {cer:.2f} | {reason}"
+            commit_msg = f"step {step} | {metrics_blurb} | {reason}"
 
             def _upload():
                 try:
@@ -131,7 +248,6 @@ class HubPushCallback(TrainerCallback):
                 except Exception as e:
                     print(f"[train] Hub push FAILED (non-fatal): {e}")
                 finally:
-                    # Clean up staging dir after upload
                     import shutil
                     shutil.rmtree(staging_dir, ignore_errors=True)
 
@@ -145,48 +261,64 @@ class HubPushCallback(TrainerCallback):
     def on_evaluate(self, args, state, control, metrics=None, **kwargs):
         """After each eval step, conditionally push to Hub.
 
-        Only runs Hub pushes and file writes on rank 0 to prevent race
-        conditions in multi-GPU (DDP) training.
-
-        With multi-dataset eval (sehaj_path + kirtan), the Trainer calls
-        on_evaluate once per dataset. We only act on sehaj_path evals for
-        hub push / best-WER tracking, and log kirtan results separately.
+        Multi-dataset eval fires on_evaluate once per split. We count the
+        PAIR of evals (sehaj + kirtan) as one "eval" for periodic-push
+        accounting, driven off sehaj_path calls (which fire first).
         """
-        if not state.is_world_process_zero:
+        if not state.is_world_process_zero or not metrics:
             return
 
         step = state.global_step
 
-        # Kirtan-only eval call — just log and return
-        kirtan_wer = metrics.get("eval_kirtan_wer")
-        if kirtan_wer is not None:
-            kirtan_cer = metrics.get("eval_kirtan_cer", float("inf"))
-            print(
-                f"[train] Eval step {step}: kirtan WER={kirtan_wer:.2f} CER={kirtan_cer:.2f}"
-            )
-            return
+        # Identify which split this eval is for (multi-eval fires once per split)
+        is_sehaj = "eval_sehaj_path_wer" in metrics
+        is_kirtan = "eval_kirtan_wer" in metrics
+        if not (is_sehaj or is_kirtan):
+            # Single-split legacy path (no aux) — treat as sehaj_path
+            is_sehaj = "eval_wer" in metrics
 
-        # Sehaj path eval — hub push and best-WER tracking
-        current_wer = metrics.get("eval_sehaj_path_wer", metrics.get("eval_wer", float("inf")))
-        current_cer = metrics.get("eval_sehaj_path_cer", metrics.get("eval_cer", float("inf")))
+        split = "sehaj_path" if is_sehaj else "kirtan"
+        wer_key = f"eval_{split}_wer" if f"eval_{split}_wer" in metrics else "eval_wer"
+        cer_key = f"eval_{split}_cer" if f"eval_{split}_cer" in metrics else "eval_cer"
 
-        self.eval_count += 1
-        is_best = current_wer < self.best_wer
-        is_periodic = (self.eval_count % self.push_every_n_evals) == 0
+        current_wer = metrics.get(wer_key, float("inf"))
+        current_cer = metrics.get(cer_key, float("inf"))
 
-        if is_best:
-            self.best_wer = current_wer
-            self._save_best_wer(current_wer, step)
+        prev_wer = self.bests[split]["wer"]
+        prev_cer = self.bests[split]["cer"]
+        improved: list[str] = []
+        if current_wer < prev_wer:
+            self.bests[split]["wer"] = current_wer
+            improved.append(f"{split}_WER")
+        if current_cer < prev_cer:
+            self.bests[split]["cer"] = current_cer
+            improved.append(f"{split}_CER")
+        if improved:
+            self.bests[split]["step"] = step
+            self._save_bests()
+
+        # Periodic-push accounting happens once per pair — sehaj call is the
+        # anchor since Trainer fires it first in the eval_dataset dict.
+        is_periodic = False
+        if is_sehaj:
+            self.eval_count += 1
+            is_periodic = (self.eval_count % self.push_every_n_evals) == 0
+
+        is_best = bool(improved)
+        print(
+            f"[train] Eval step {step}: {split} "
+            f"WER={current_wer:.2f} (best {self.bests[split]['wer']:.2f}) "
+            f"CER={current_cer:.2f} (best {self.bests[split]['cer']:.2f})"
+            + (f" — improved: {','.join(improved)}" if improved else "")
+        )
 
         if is_best or is_periodic:
             model = kwargs.get("model")
-            reason = "best" if is_best else "periodic"
-            self._push_to_hub(model, step, current_wer, current_cer, reason)
-
-        print(
-            f"[train] Eval step {step}: sehaj_path WER={current_wer:.2f} CER={current_cer:.2f} "
-            f"(best_wer={self.best_wer:.2f}, evals={self.eval_count})"
-        )
+            reason = "best-" + "+".join(improved) if is_best else "periodic"
+            metrics_blurb = (
+                f"{split} WER {current_wer:.2f} CER {current_cer:.2f}"
+            )
+            self._push_to_hub(model, step, reason, metrics_blurb)
 
 
 class SurtTrainer(Seq2SeqTrainer):
@@ -307,6 +439,25 @@ def make_compute_metrics(processor):
     return compute_metrics
 
 
+def _should_disable_grad_ckpt(gpu_name: str) -> bool:
+    """Disable gradient_checkpointing on 48GB+ Ampere/Hopper GPUs.
+
+    gradient_checkpointing trades ~35% throughput for VRAM. On A40/A6000/A100/H100
+    with Whisper-small + batch 64 + bf16, VRAM peaks at ~30GB — plenty of headroom
+    without checkpointing. Keep it ON for 24GB cards (4090/3090/A5000) where VRAM
+    is tight.
+
+    Override with SURT_GRAD_CKPT=1 or SURT_GRAD_CKPT=0 to force either way.
+    """
+    override = os.environ.get("SURT_GRAD_CKPT", "").strip()
+    if override == "1":
+        return False  # do NOT disable — user forced grad_ckpt ON
+    if override == "0":
+        return True   # DO disable — user forced grad_ckpt OFF
+    roomy = any(tag in gpu_name for tag in ("A40", "A6000", "A100", "H100", "H200", "L40"))
+    return roomy
+
+
 def build_training_args(
     *,
     output_dir: str = OUTPUT_DIR,
@@ -320,18 +471,25 @@ def build_training_args(
 ) -> Seq2SeqTrainingArguments:
     """Build Seq2SeqTrainingArguments with all training hyperparameters.
 
-    All values come from surt.config constants. Key design choices:
-    - bf16=True (not fp16) for Ampere GPU numerical stability
-    - gradient_checkpointing with use_reentrant=False for PyTorch 2.x
-    - max_steps instead of num_train_epochs (streaming IterableDataset has no length)
-    - eval_strategy (not evaluation_strategy) for transformers v5
-    - dataloader_num_workers=0 for streaming IterableDataset safety
-    - push_to_hub=False (custom HubPushCallback handles Hub pushes)
-    - remove_unused_columns=False (streaming datasets may lack column_names)
-
-    Returns:
-        Configured Seq2SeqTrainingArguments.
+    Key design choices:
+    - bf16=True for Ampere numerical stability
+    - gradient_checkpointing auto-decided by GPU VRAM (off on 48GB+ cards)
+    - max_steps (not num_train_epochs) so streaming IterableDataset works
+    - dataloader num_workers + persistent_workers + prefetch tuned for throughput
+    - push_to_hub=False (custom HubPushCallback handles pushes)
     """
+    gpu_name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "cpu"
+    use_grad_ckpt = not _should_disable_grad_ckpt(gpu_name)
+
+    # Dataloader knobs only apply when num_workers > 0 (non-streaming path).
+    dl_kwargs = {}
+    if dataloader_num_workers > 0:
+        dl_kwargs = {
+            "dataloader_persistent_workers": True,
+            "dataloader_prefetch_factor": 4,
+            "dataloader_pin_memory": True,
+        }
+
     args = Seq2SeqTrainingArguments(
         output_dir=output_dir,
         per_device_train_batch_size=BATCH_SIZE,
@@ -343,8 +501,8 @@ def build_training_args(
         lr_scheduler_type="cosine",
         weight_decay=WEIGHT_DECAY,
         bf16=True,
-        gradient_checkpointing=True,
-        gradient_checkpointing_kwargs={"use_reentrant": False},
+        gradient_checkpointing=use_grad_ckpt,
+        gradient_checkpointing_kwargs={"use_reentrant": False} if use_grad_ckpt else None,
         eval_strategy="steps",
         eval_steps=eval_steps,
         save_strategy="steps",
@@ -359,6 +517,11 @@ def build_training_args(
         report_to=report_to,
         run_name=run_name,
         remove_unused_columns=False,
+        **dl_kwargs,
+    )
+    print(
+        f"[train] gpu={gpu_name}  grad_ckpt={use_grad_ckpt}  "
+        f"dl_workers={dataloader_num_workers}  persistent={dl_kwargs.get('dataloader_persistent_workers', False)}"
     )
 
     print(
@@ -411,21 +574,38 @@ def run_training_job(
         print("[train] Starting fresh training run (resume disabled)")
 
     model, processor = load_model_and_processor()
+
+    # Extra sehaj override from env — useful for turning it off without
+    # editing config (e.g. SURT_EXTRA_SEHAJ_DATASET="" disables).
+    extra_sehaj = os.environ.get(
+        "SURT_EXTRA_SEHAJ_DATASET", EXTRA_SEHAJ_DATASET_NAME
+    ).strip() or None
+    extra_sehaj_col = os.environ.get(
+        "SURT_EXTRA_SEHAJ_TEXT_COLUMN", EXTRA_SEHAJ_TEXT_COLUMN
+    ).strip() or None
+
     train_dataset = get_train_dataset(
         dataset_name,
         processor,
         aux_dataset_name=aux_dataset_name,
         aux_probability=aux_probability,
         streaming=streaming,
+        extra_sehaj_dataset_name=extra_sehaj,
+        extra_sehaj_text_column=extra_sehaj_col,
     )
-    val_dataset = get_val_dataset(dataset_name, processor)
+    # v3: eval datasets live in separate Hub repos (SEHAJ_EVAL_DATASET_NAME,
+    # KIRTAN_EVAL_DATASET_NAME). The training datasets (DATASET_NAME /
+    # AUX_TRAIN_DATASET_NAME) are NOT used for eval — that would be a data leak.
+    val_dataset = get_val_dataset(SEHAJ_EVAL_DATASET_NAME, processor)
 
-    # Build eval dataset dict: sehaj_path + kirtan (if aux dataset provided)
-    eval_datasets = {"sehaj_path": val_dataset}
+    # If aux training is enabled, we evaluate on both splits (sehaj + kirtan).
+    # Otherwise just sehaj.
+    eval_dataset = val_dataset
     if aux_dataset_name:
+        eval_dataset = {"sehaj_path": val_dataset}
         try:
-            kirtan_val = get_kirtan_val_dataset(aux_dataset_name, processor)
-            eval_datasets["kirtan"] = kirtan_val
+            kirtan_val = get_kirtan_val_dataset(KIRTAN_EVAL_DATASET_NAME, processor)
+            eval_dataset["kirtan"] = kirtan_val
         except Exception as e:
             print(f"[train] WARNING: kirtan val set unavailable: {e}. Evaluating sehaj_path only.")
 
@@ -442,25 +622,54 @@ def run_training_job(
         logging_steps=logging_steps,
         report_to=["wandb"] if enable_wandb else "none",
         run_name=run_name,
-        dataloader_num_workers=0 if streaming else 8,
+        dataloader_num_workers=0 if streaming else int(os.environ.get("SURT_DL_WORKERS", "8")),
     )
 
     callbacks = []
     if enable_hub_callback:
-        callbacks = [
+        callbacks.append(
             HubPushCallback(
                 hub_repo=TRAINING_HUB_REPO,
                 processor=processor,
                 output_dir=output_dir,
                 push_every_n_evals=3,
             )
-        ]
+        )
+
+    # Early stopping: configurable split + patience via env.
+    early_stop_split = os.environ.get("SURT_EARLY_STOP_METRIC", EARLY_STOP_METRIC).strip()
+    early_stop_patience = int(
+        os.environ.get("SURT_EARLY_STOP_PATIENCE", str(EARLY_STOP_PATIENCE))
+    )
+    if early_stop_split != "none" and early_stop_patience > 0:
+        # Only attach when that split will actually evaluate — watching kirtan
+        # but running sehaj-only eval would never trigger.
+        split_available = (
+            (early_stop_split == "kirtan" and aux_dataset_name)
+            or (early_stop_split == "sehaj_path")
+        )
+        if split_available:
+            callbacks.append(
+                PlateauEarlyStopCallback(
+                    split_name=early_stop_split,
+                    patience=early_stop_patience,
+                )
+            )
+            print(
+                f"[train] Early stop armed: patience={early_stop_patience} "
+                f"on eval_{early_stop_split}_{{wer,cer}}"
+            )
+        else:
+            print(
+                f"[train] Early stop disabled: split '{early_stop_split}' "
+                f"not in current eval config (aux_dataset_name={aux_dataset_name})"
+            )
 
     trainer = SurtTrainer(
         model=model,
         args=training_args,
         train_dataset=train_dataset,
-        eval_dataset=eval_datasets,
+        eval_dataset=eval_dataset,
         data_collator=data_collator,
         compute_metrics=make_compute_metrics(processor),
         processing_class=processor.feature_extractor,
@@ -508,19 +717,34 @@ def validate_smoke_training(trainer, smoke_steps: int) -> None:
     print(f"[smoke] LR first={lrs[0]:.8f}, last={lrs[-1]:.8f}")
 
 
-def push_final_model_to_hub(model, processor, *, repo_id: str, final_step: int) -> None:
-    """CKPT-04: push final trained model and processor to HF_MODEL_REPO."""
+def push_model_to_hub(
+    model,
+    processor,
+    *,
+    repo_id: str,
+    commit_message: str,
+) -> None:
+    """Push model and processor artifacts to a Hub repo."""
     api = HfApi()
     with tempfile.TemporaryDirectory(prefix="surt-final-") as staging_dir:
         model.save_pretrained(staging_dir)
         processor.save_pretrained(staging_dir)
-        commit_message = f"surt_small_v2 final (step {final_step})"
         api.upload_folder(
             repo_id=repo_id,
             folder_path=staging_dir,
             commit_message=commit_message,
         )
-    print(f"[train] Final model pushed to {repo_id} at step {final_step}")
+    print(f"[train] Model pushed to {repo_id}: {commit_message}")
+
+
+def push_final_model_to_hub(model, processor, *, repo_id: str, final_step: int) -> None:
+    """CKPT-04: push final trained model and processor to HF_MODEL_REPO."""
+    push_model_to_hub(
+        model,
+        processor,
+        repo_id=repo_id,
+        commit_message=f"surt_small_v3 final (step {final_step})",
+    )
 
 
 def parse_args():
@@ -585,6 +809,12 @@ def parse_args():
         "--skip-final-push",
         action="store_true",
         help="Skip CKPT-04 final model push to HF_MODEL_REPO",
+    )
+    parser.add_argument(
+        "--pilot-push-repo",
+        type=str,
+        default=None,
+        help="Optional Hub repo to upload model+processor after pilot completes",
     )
     return parser.parse_args()
 
@@ -673,7 +903,7 @@ def main():
             pilot_logging_steps = args.logging_steps
 
         pilot_dir = os.path.join(OUTPUT_DIR, "pilot")
-        pilot_trainer, _ = run_training_job(
+        pilot_trainer, pilot_processor = run_training_job(
             dataset_name=DATASET_NAME,
             output_dir=pilot_dir,
             max_steps=pilot_steps,
@@ -681,7 +911,7 @@ def main():
             save_steps=pilot_save_steps,
             logging_steps=pilot_logging_steps,
             enable_hub_callback=True,
-            resume_from_last_checkpoint=True,
+            resume_from_last_checkpoint=False,
             aux_dataset_name=AUX_TRAIN_DATASET_NAME,
             aux_probability=AUX_TRAIN_PROBABILITY,
             enable_wandb=enable_wandb,
@@ -692,6 +922,17 @@ def main():
             f"[train] Pilot complete at step {pilot_trainer.state.global_step} "
             f"(WER/CER logged in eval metrics)"
         )
+        if args.pilot_push_repo:
+            print(f"[train] Uploading pilot model to {args.pilot_push_repo} ...")
+            push_model_to_hub(
+                pilot_trainer.model,
+                pilot_processor,
+                repo_id=args.pilot_push_repo,
+                commit_message=(
+                    "kirtan_first_pilot500 "
+                    f"(step {pilot_trainer.state.global_step})"
+                ),
+            )
         return
 
     if run_full:

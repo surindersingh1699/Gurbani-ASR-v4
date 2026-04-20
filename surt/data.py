@@ -42,7 +42,6 @@ try:
     from audiomentations import (
         AddGaussianNoise,
         Compose,
-        PitchShift,
         RoomSimulator,
         TimeStretch,
     )
@@ -51,7 +50,7 @@ except ModuleNotFoundError:
     _HAS_AUGMENT = False
 from datasets import Audio, Dataset, IterableDataset, concatenate_datasets, interleave_datasets, load_dataset
 
-from surt.config import SHUFFLE_BUFFER, VAL_SIZE, VAL_SPLIT
+from surt.config import GENERATION_MAX_LENGTH, SHUFFLE_BUFFER, VAL_SIZE, VAL_SPLIT
 
 # --- Column names ---
 AUDIO_COLUMN = "audio"
@@ -59,17 +58,15 @@ TEXT_COLUMN = "transcription"
 
 # --- Augmentation pipeline (training only) ---
 # Applied to raw waveform BEFORE feature extraction.
-# Probabilities tuned for Gurbani audio (single speaker, clean recordings):
-#   - Gaussian noise at p=0.4: simulate microphone/environment noise
-#   - Room reverb at p=0.3: simulate different recording spaces
-#   - Time stretch at p=0.2: tempo variation without pitch change
-#   - Pitch shift at p=0.2: simulate slight speaker pitch variation
+# v3 tuning — kirtan is tonal/rhythmic content where pitch/tempo distortion
+# corrupts raga tonal center and tabla cadence. Dropped PitchShift entirely
+# and narrowed TimeStretch. Noise + reverb remain — those are environmental,
+# not musical.
 if _HAS_AUGMENT:
     augment = Compose([
         AddGaussianNoise(min_amplitude=0.001, max_amplitude=0.015, p=0.4),
         RoomSimulator(p=0.3),
-        TimeStretch(min_rate=0.8, max_rate=1.25, p=0.2),
-        PitchShift(min_semitones=-4, max_semitones=4, p=0.2),
+        TimeStretch(min_rate=0.9, max_rate=1.1, p=0.1),
     ])
 else:
     def augment(*, samples, sample_rate):  # type: ignore[override]
@@ -81,6 +78,28 @@ _HF_INITIAL_BACKOFF = 2.0  # seconds
 _HF_BACKOFF_FACTOR = 2.0   # exponential multiplier
 
 
+def _make_label_fits_filter(processor: Any, text_column: str, max_labels: int):
+    """Return a predicate that drops rows whose tokenized label exceeds max_labels.
+
+    Gurmukhi BPE expands 3–5× vs English, so a dense 30 s kirtan segment can
+    exceed GENERATION_MAX_LENGTH=448 tokens. Those rows would be silently
+    truncated during collation and train the model on incomplete targets.
+    Cheap tokenizer-only check (no audio work) — ~a few minutes for 190k rows.
+    """
+    tokenizer = processor.tokenizer
+
+    def _fits(example: dict) -> bool:
+        raw = example.get(text_column)
+        if raw is None:
+            return False
+        text = normalize_gurbani_text(raw)
+        if not text:
+            return False
+        return len(tokenizer(text, add_special_tokens=True).input_ids) <= max_labels
+
+    return _fits
+
+
 def _load_dataset_with_retry(
     dataset_name: str,
     split: str,
@@ -90,6 +109,10 @@ def _load_dataset_with_retry(
 
     Streaming datasets from HuggingFace Hub can hit rate limits (HTTP 429).
     This wrapper retries with exponential backoff to handle transient failures.
+
+    For non-streaming loads, parquet shards are downloaded in parallel
+    (controlled by $SURT_DOWNLOAD_WORKERS, default 8) — HF caps single-stream
+    at ~8 MB/s, so parallelism is the only way to saturate the link.
 
     Args:
         dataset_name: HuggingFace dataset identifier.
@@ -104,10 +127,15 @@ def _load_dataset_with_retry(
     """
     last_exception = None
     backoff = _HF_INITIAL_BACKOFF
+    # Parallel shard download — only meaningful when streaming=False.
+    download_workers = int(os.environ.get("SURT_DOWNLOAD_WORKERS", "8"))
 
     for attempt in range(1, _HF_MAX_RETRIES + 1):
         try:
-            ds = load_dataset(dataset_name, split=split, streaming=streaming)
+            load_kwargs: dict[str, Any] = {"split": split, "streaming": streaming}
+            if not streaming and download_workers > 1:
+                load_kwargs["num_proc"] = download_workers
+            ds = load_dataset(dataset_name, **load_kwargs)
             return ds
         except Exception as e:
             last_exception = e
@@ -139,6 +167,8 @@ def get_train_dataset(
     aux_dataset_name: str | None = None,
     aux_probability: float = 0.15,
     streaming: bool = False,
+    extra_sehaj_dataset_name: str | None = None,
+    extra_sehaj_text_column: str | None = None,
 ) -> IterableDataset | Dataset:
     """Load training dataset with waveform augmentation.
 
@@ -181,15 +211,29 @@ def get_train_dataset(
 
         return {"input_features": input_features, "labels": labels}
 
+    label_fits_primary = _make_label_fits_filter(
+        processor, text_column, GENERATION_MAX_LENGTH
+    )
+
     if streaming:
-        def _process_stream(ds: IterableDataset) -> IterableDataset:
-            """Cast audio, shuffle, and apply prepare_train to a stream."""
+        if extra_sehaj_dataset_name:
+            # Streaming path is only used for smoke tests (~10 steps). Adding a
+            # second sehaj interleave here isn't worth the complexity — pilot
+            # and full runs both use non-streaming, where extra sehaj IS wired.
+            print(
+                "[data] NOTE: extra_sehaj_dataset_name is set but streaming=True. "
+                "Extra sehaj is only concatenated in non-streaming mode; ignoring here."
+            )
+
+        def _process_stream(ds: IterableDataset, fits_fn) -> IterableDataset:
+            """Cast audio, drop over-length labels, shuffle, prepare."""
             ds = ds.cast_column(AUDIO_COLUMN, Audio(sampling_rate=16000))
+            ds = ds.filter(fits_fn)
             ds = ds.shuffle(seed=42, buffer_size=SHUFFLE_BUFFER)
             return ds.map(prepare_train)
 
         ds_primary = _load_dataset_with_retry(dataset_name, split=split, streaming=True)
-        ds_primary = _process_stream(ds_primary)
+        ds_primary = _process_stream(ds_primary, label_fits_primary)
 
         ds = ds_primary
         if aux_dataset_name and aux_probability > 0:
@@ -199,9 +243,12 @@ def get_train_dataset(
                 ds_aux = ds_aux.cast_column(AUDIO_COLUMN, Audio(sampling_rate=16000))
                 # Filter to ≤30s — longer segments degrade training quality
                 ds_aux = ds_aux.filter(lambda x: x.get("duration", 0) <= 30)
-                # Kirtan uses 'gurmukhi_text' — add expected text column
-                _tc = text_column
-                ds_aux = ds_aux.map(lambda x: {_tc: x["gurmukhi_text"]})
+                # Canonical kirtan exposes `final_text` (same name as primary sehaj
+                # via TEXT_COLUMN), so no column rename is needed. If a future aux
+                # dataset uses a different column, harmonize here with a .map().
+                ds_aux = ds_aux.filter(
+                    _make_label_fits_filter(processor, text_column, GENERATION_MAX_LENGTH)
+                )
                 ds_aux = ds_aux.shuffle(seed=42, buffer_size=SHUFFLE_BUFFER)
                 ds_aux = ds_aux.map(prepare_train)
 
@@ -249,6 +296,67 @@ def get_train_dataset(
     print(f"[data] Loading training dataset in-memory from {dataset_name} (split={split})...")
     ds = _load_dataset_with_retry(dataset_name, split=split, streaming=False)
     ds = ds.cast_column(AUDIO_COLUMN, Audio(sampling_rate=16000))
+    _pre_filter_n = len(ds)
+    ds = ds.filter(label_fits_primary)
+    _dropped = _pre_filter_n - len(ds)
+    if _dropped:
+        print(
+            f"[data] Dropped {_dropped}/{_pre_filter_n} primary rows with "
+            f"labels > {GENERATION_MAX_LENGTH} tokens"
+        )
+
+    # Optional: concatenate an additional sehaj source with the primary sehaj
+    # stream BEFORE aux (kirtan) mixing. Column name is harmonized to
+    # `text_column` (the primary canonical name). Rows whose labels exceed
+    # GENERATION_MAX_LENGTH are filtered using the same tokenizer check as primary.
+    if extra_sehaj_dataset_name:
+        try:
+            print(
+                f"[data] Loading extra sehaj in-memory from "
+                f"{extra_sehaj_dataset_name} (col={extra_sehaj_text_column})..."
+            )
+            ds_extra = _load_dataset_with_retry(
+                extra_sehaj_dataset_name, split=split, streaming=False
+            )
+            ds_extra = ds_extra.cast_column(AUDIO_COLUMN, Audio(sampling_rate=16000))
+
+            # Rename source text column → canonical text_column if they differ.
+            if extra_sehaj_text_column and extra_sehaj_text_column != text_column:
+                _src_col = extra_sehaj_text_column
+                _dst_col = text_column
+                ds_extra = ds_extra.map(lambda x: {_dst_col: x[_src_col]})
+
+            _extra_pre = len(ds_extra)
+            ds_extra = ds_extra.filter(
+                _make_label_fits_filter(processor, text_column, GENERATION_MAX_LENGTH)
+            )
+            _extra_dropped = _extra_pre - len(ds_extra)
+            if _extra_dropped:
+                print(
+                    f"[data] Dropped {_extra_dropped}/{_extra_pre} extra sehaj rows "
+                    f"with labels > {GENERATION_MAX_LENGTH} tokens"
+                )
+
+            # Harmonize columns across both sehaj streams before concatenating.
+            keep_cols = {AUDIO_COLUMN, text_column}
+            ds = ds.remove_columns([c for c in ds.column_names if c not in keep_cols])
+            ds_extra = ds_extra.remove_columns(
+                [c for c in ds_extra.column_names if c not in keep_cols]
+            )
+
+            _primary_n = len(ds)
+            ds = concatenate_datasets([ds, ds_extra])
+            print(
+                f"[data] Sehaj streams concatenated: primary={_primary_n} + "
+                f"extra={len(ds_extra)} = {len(ds)}"
+            )
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            print(
+                f"[data] WARNING: extra sehaj unavailable ({extra_sehaj_dataset_name}): {e}. "
+                "Continuing with primary sehaj only."
+            )
 
     # Mix in auxiliary (kirtan) dataset if provided
     if aux_dataset_name and aux_probability > 0:
@@ -259,9 +367,17 @@ def get_train_dataset(
             ds_aux = ds_aux.cast_column(AUDIO_COLUMN, Audio(sampling_rate=16000))
             # Filter to ≤30s — longer segments degrade training quality
             ds_aux = ds_aux.filter(lambda x: x.get("duration", 0) <= 30)
-            # Kirtan uses 'gurmukhi_text' — map to expected text column
-            _tc = text_column
-            ds_aux = ds_aux.map(lambda x: {_tc: x["gurmukhi_text"]})
+            # Canonical kirtan exposes TEXT_COLUMN directly — no column rename.
+            _aux_pre_n = len(ds_aux)
+            ds_aux = ds_aux.filter(
+                _make_label_fits_filter(processor, text_column, GENERATION_MAX_LENGTH)
+            )
+            _aux_dropped = _aux_pre_n - len(ds_aux)
+            if _aux_dropped:
+                print(
+                    f"[data] Dropped {_aux_dropped}/{_aux_pre_n} aux rows with "
+                    f"labels > {GENERATION_MAX_LENGTH} tokens"
+                )
 
             # Harmonize columns: keep only audio + text_column
             keep_cols = {AUDIO_COLUMN, text_column}
@@ -377,8 +493,8 @@ def get_kirtan_val_dataset(
     dataset_name: str,
     processor: Any,
     split: str = "validation",
-    text_column: str = "gurmukhi_text",
-    val_size: int = 200,
+    text_column: str = TEXT_COLUMN,
+    val_size: int = 400,
     max_duration: float = 30.0,
 ) -> Dataset:
     """Load a kirtan validation set for separate eval alongside sehaj path.
@@ -400,6 +516,10 @@ def get_kirtan_val_dataset(
     stream = _load_dataset_with_retry(dataset_name, split=split, streaming=True)
     stream = stream.cast_column(AUDIO_COLUMN, Audio(sampling_rate=16000))
     stream = stream.filter(lambda x: x.get("duration", 0) <= max_duration)
+    # Skip eval rows whose labels would be truncated — WER on those is meaningless.
+    stream = stream.filter(
+        _make_label_fits_filter(processor, text_column, GENERATION_MAX_LENGTH)
+    )
 
     val_examples = list(stream.take(val_size))
 
