@@ -50,11 +50,16 @@ except ModuleNotFoundError:
     _HAS_AUGMENT = False
 from datasets import Audio, Dataset, IterableDataset, concatenate_datasets, interleave_datasets, load_dataset
 
-from surt.config import GENERATION_MAX_LENGTH, SHUFFLE_BUFFER, VAL_SIZE, VAL_SPLIT
+from surt.config import (
+    GENERATION_MAX_LENGTH,
+    SHUFFLE_BUFFER,
+    TEXT_COLUMN,
+    VAL_SIZE,
+    VAL_SPLIT,
+)
 
 # --- Column names ---
 AUDIO_COLUMN = "audio"
-TEXT_COLUMN = "transcription"
 
 # --- Augmentation pipeline (training only) ---
 # Applied to raw waveform BEFORE feature extraction.
