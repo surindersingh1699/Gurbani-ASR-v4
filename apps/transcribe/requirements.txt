@@ -1,0 +1,9 @@
+gradio>=4.44
+numpy
+soundfile
+# Mac GPU backend (fastest). Installs on Apple Silicon only.
+mlx>=0.18; platform_system == "Darwin" and platform_machine == "arm64"
+mlx-whisper>=0.4.2; platform_system == "Darwin" and platform_machine == "arm64"
+# Fallback backend (works everywhere; uses MPS on Mac).
+transformers>=4.44
+torch>=2.3
