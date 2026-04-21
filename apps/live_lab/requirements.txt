@@ -1,0 +1,21 @@
+# Surt live_lab — CPU-first live mic testbed
+# Install on top of the repo's base requirements.
+
+# ASR runtime (CPU INT8)
+faster-whisper>=1.0.3
+ctranslate2>=4.4.0
+
+# Silero VAD + Torch (needed for VAD even if you run ASR on CPU)
+torch>=2.2.0
+torchaudio>=2.2.0
+
+# Shabad tracker (MuRIL embeddings + FAISS)
+sentence-transformers>=2.7.0
+faiss-cpu>=1.7.4
+
+# Signal processing
+scipy>=1.11.0
+numpy>=1.24.0
+
+# UI
+gradio>=4.29.0
