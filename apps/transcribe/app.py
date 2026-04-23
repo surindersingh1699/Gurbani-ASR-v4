@@ -1606,7 +1606,7 @@ def build_app(backend) -> gr.Blocks:
                 if _rms(commit_slice) >= st.vad_threshold:
                     txt = _transcribe(st, commit_slice)
                     if txt:
-                        st.committed = (st.committed + " " + txt).strip()
+                        st.committed = _merge_committed(st.committed, txt)
                         _refresh_matches(st, smooth=True)
                         _try_auto_push(st)
                 st.buffer = st.buffer[-carry_samples:].copy()
@@ -1940,7 +1940,7 @@ def build_app(backend) -> gr.Blocks:
                     window = buf[s0:s1]
                     text = _transcribe(st, window)
                     if text:
-                        st.committed = (st.committed + " " + text).strip()
+                        st.committed = _merge_committed(st.committed, text)
                         _refresh_matches(st, smooth=True)
                         if (auto_push and st.matches
                                 and st.sttm_connected and st.sttm_port
@@ -1988,7 +1988,7 @@ def build_app(backend) -> gr.Blocks:
                 s1 = s0 + window_samples
                 text = _transcribe(st, buf[s0:s1])
                 if text:
-                    st.committed = (st.committed + " " + text).strip()
+                    st.committed = _merge_committed(st.committed, text)
                     _refresh_matches(st, smooth=True)
                 transcribed_up_to = s1
 
@@ -1996,7 +1996,7 @@ def build_app(backend) -> gr.Blocks:
                 tail = buf[transcribed_up_to:]
                 text = _transcribe(st, tail)
                 if text:
-                    st.committed = (st.committed + " " + text).strip()
+                    st.committed = _merge_committed(st.committed, text)
                     _refresh_matches(st, smooth=True)
 
             yield (st, _render_stage(st), _render_action_bar(st),
@@ -2047,7 +2047,7 @@ def build_app(backend) -> gr.Blocks:
 
                 text = _transcribe(st, chunk)
                 if text:
-                    st.committed = (st.committed + " " + text).strip()
+                    st.committed = _merge_committed(st.committed, text)
                     _refresh_matches(st, smooth=True)
                     if (auto_push and st.matches and st.sttm_connected and st.sttm_port
                             and float(st.matches[0].get("score", 0.0))
