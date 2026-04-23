@@ -124,10 +124,12 @@ class StreamState:
     last_stream_t: float = 0.0
     stream_calls: int = 0
 
-    # Auto-push dedupe across the whole session (mic + URL + file). Reset on
-    # clear / unlock. Lets us push once per shabad transition even though
-    # the same shabad is the top match for many consecutive windows.
-    last_pushed_sid: int | None = None
+    # Auto-push dedupe across the whole session (mic + URL + file). Reset
+    # on clear / lock / unlock. Keyed on (shabadId, verseId) so a within-
+    # shabad pointer advance re-pushes and STTM follows the ragi line by
+    # line. (Keying on shabadId alone left STTM stuck on whichever line we
+    # pushed at lock time.)
+    last_pushed_key: tuple[int, int] | None = None
 
     # Settings
     vad_threshold: float = 0.005
@@ -1454,6 +1456,7 @@ def build_app(backend) -> gr.Blocks:
             st.unlock_miss_count = 0
             st.lock_streak_count = 0
             st.last_top_sid_for_lock = sid
+            st.last_pushed_key = None
             if st.retrieval_ema is not None:
                 st.retrieval_ema.reset()
             print(f"[lock] lock · sid={sid} · tuk_row={tuk_row}")
@@ -1465,7 +1468,7 @@ def build_app(backend) -> gr.Blocks:
             st.lock_streak_count = 0
             st.last_top_sid_for_lock = None
             st.last_search_key = ""  # force fresh retrieval on next tick
-            st.last_pushed_sid = None  # allow re-push if ragi returns to same shabad
+            st.last_pushed_key = None  # allow re-push if ragi returns to same shabad
             if st.retrieval_ema is not None:
                 st.retrieval_ema.reset()
 
@@ -1674,7 +1677,7 @@ def build_app(backend) -> gr.Blocks:
             st.buffer = np.zeros(0, dtype=np.float32)
             st.matches = []
             st.last_search_key = ""
-            st.last_pushed_sid = None
+            st.last_pushed_key = None
             if st.retrieval_ema is not None:
                 st.retrieval_ema.reset()
             toast = _render_toast("Transcript cleared.", "warn", undo=True)
@@ -1730,9 +1733,10 @@ def build_app(backend) -> gr.Blocks:
             Gates:
               • at least one match above the auto-push threshold
               • STTM reachable (probes once if unknown)
-              • we haven't already pushed this shabadId (dedupes per transition)
-            Called from every path that refreshes matches (live mic, URL
-            stream, file play-sync).
+              • we haven't already pushed this (shabadId, verseId) pair
+            Dedup is on the *pair* so locked-pointer advances re-push and
+            STTM follows line-by-line. Called from every path that refreshes
+            matches (live mic, URL stream, file play-sync).
             """
             if not st.matches:
                 return
@@ -1743,12 +1747,16 @@ def build_app(backend) -> gr.Blocks:
             if not (st.sttm_connected and st.sttm_port):
                 return
             sid = top.get("shabadId")
-            if not sid or sid == st.last_pushed_sid:
+            vid = top.get("verseId") or sid
+            if not sid:
+                return
+            key = (int(sid), int(vid))
+            if key == st.last_pushed_key:
                 return
             res = push_hit(st.sttm_host, st.sttm_port, top, pin=st.sttm_pin or None)
             if res.ok:
-                st.last_pushed_sid = sid
-                print(f"[sttm] pushed sid={sid} · score={top.get('score')}")
+                st.last_pushed_key = key
+                print(f"[sttm] pushed sid={sid} verseId={vid} · score={top.get('score')}")
             else:
                 print(f"[sttm] push failed: {res.detail}")
 
@@ -1898,7 +1906,7 @@ def build_app(backend) -> gr.Blocks:
             window_samples = int(window_s * TARGET_SR)
             buf = np.zeros(0, dtype=np.float32)
             transcribed_up_to = 0
-            last_pushed_sid: int | None = None
+            last_pushed_key: tuple[int, int] | None = None
             t_start = time.time()
             playlist_emitted = False
             # Browser playback only starts ~2-3 s after we signal it (first
@@ -1948,10 +1956,13 @@ def build_app(backend) -> gr.Blocks:
                                     >= st.auto_push_threshold):
                             top = st.matches[0]
                             sid = top.get("shabadId")
-                            if sid and sid != last_pushed_sid:
-                                push_hit(st.sttm_host, st.sttm_port, top,
-                                         pin=st.sttm_pin or None)
-                                last_pushed_sid = sid
+                            vid = top.get("verseId") or sid
+                            if sid:
+                                key = (int(sid), int(vid))
+                                if key != last_pushed_key:
+                                    push_hit(st.sttm_host, st.sttm_port, top,
+                                             pin=st.sttm_pin or None)
+                                    last_pushed_key = key
                     transcribed_up_to = s1
 
                 pos_s = buf.size / TARGET_SR
@@ -2031,7 +2042,7 @@ def build_app(backend) -> gr.Blocks:
             total = audio.size
             t_start = time.time()
             i = 0
-            last_pushed_sid: int | None = None
+            last_pushed_key: tuple[int, int] | None = None
 
             st.committed = ""
             st.tentative = ""
@@ -2054,10 +2065,13 @@ def build_app(backend) -> gr.Blocks:
                                 >= st.auto_push_threshold):
                         top = st.matches[0]
                         sid = top.get("shabadId")
-                        if sid and sid != last_pushed_sid:
-                            push_hit(st.sttm_host, st.sttm_port, top,
-                                     pin=st.sttm_pin or None)
-                            last_pushed_sid = sid
+                        vid = top.get("verseId") or sid
+                        if sid:
+                            key = (int(sid), int(vid))
+                            if key != last_pushed_key:
+                                push_hit(st.sttm_host, st.sttm_port, top,
+                                         pin=st.sttm_pin or None)
+                                last_pushed_key = key
 
                 pos_s = (i + 1) * step_s
                 dur_s = total / sr
