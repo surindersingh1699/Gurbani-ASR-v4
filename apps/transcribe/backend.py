@@ -72,27 +72,33 @@ class CT2Backend:
         )
         self.dtype = compute_type  # for display parity with TorchBackend
 
-    def transcribe(self, audio: np.ndarray, sr: int) -> str:
+    def transcribe(
+        self, audio: np.ndarray, sr: int, *,
+        vad_filter: bool = True,
+    ) -> str:
         if sr != 16000:
             audio = _resample_to_16k(audio, sr)
-        segments, _ = self.model.transcribe(
-            audio.astype(np.float32),
+        # Silero VAD — ships with faster-whisper. Skips non-speech regions
+        # so short/silent live-mic buffers don't get hallucinated text
+        # ("ਵਾਹਿਗੁਰੂ ਵਾਹਿਗੁਰੂ …" loops on quiet browser mic audio). The
+        # caller can disable it (e.g. when the user wants to capture very
+        # quiet live speech that VAD would otherwise drop).
+        # We DON'T use temperature fallback or no_repeat_ngram_size here —
+        # both harm legitimate Gurbani repetition ("ਮੇਰੀ ਪ੍ਰੀਤਿ ਮੇਰੀ ਪ੍ਰੀਤਿ"
+        # is canonical, not a bug), and higher temperatures degrade script
+        # into mixed-script garbage on this small model.
+        kwargs: dict = dict(
             beam_size=self.beam_size,
             temperature=0.0,
             language=self.language,
             task="transcribe",
             condition_on_previous_text=False,
-            # Silero VAD — ships with faster-whisper. Skips non-speech regions
-            # so short/silent live-mic buffers don't get hallucinated text
-            # ("ਵਾਹਿਗੁਰੂ ਵਾਹਿਗੁਰੂ …" loops on quiet browser mic audio).
-            # We DON'T use temperature fallback or no_repeat_ngram_size here —
-            # both harm legitimate Gurbani repetition ("ਮੇਰੀ ਪ੍ਰੀਤਿ ਮੇਰੀ ਪ੍ਰੀਤਿ"
-            # is canonical, not a bug), and higher temperatures degrade script
-            # into mixed-script garbage on this small model.
-            vad_filter=True,
-            vad_parameters={"min_silence_duration_ms": 300},
             no_speech_threshold=0.6,
         )
+        if vad_filter:
+            kwargs["vad_filter"] = True
+            kwargs["vad_parameters"] = {"min_silence_duration_ms": 300}
+        segments, _ = self.model.transcribe(audio.astype(np.float32), **kwargs)
         return "".join(seg.text for seg in segments).strip()
 
 
@@ -105,7 +111,12 @@ class MLXBackend:
         self._mlx_whisper = mlx_whisper
         self._path = str(mlx_dir)
 
-    def transcribe(self, audio: np.ndarray, sr: int) -> str:
+    def transcribe(
+        self, audio: np.ndarray, sr: int, *, vad_filter: bool = True,
+    ) -> str:
+        # MLX whisper doesn't expose a Silero VAD stage; vad_filter is
+        # accepted for signature parity and currently ignored.
+        del vad_filter
         if sr != 16000:
             audio = _resample_to_16k(audio, sr)
         result = self._mlx_whisper.transcribe(
@@ -156,7 +167,12 @@ class TorchBackend:
         model.eval()
         self.model = model
 
-    def transcribe(self, audio: np.ndarray, sr: int) -> str:
+    def transcribe(
+        self, audio: np.ndarray, sr: int, *, vad_filter: bool = True,
+    ) -> str:
+        # transformers WhisperForConditionalGeneration has no built-in VAD;
+        # vad_filter is accepted for signature parity and currently ignored.
+        del vad_filter
         feats = self.processor(
             audio.astype(np.float32), sampling_rate=sr, return_tensors="pt"
         ).input_features.to(self.device, self.dtype)

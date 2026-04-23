@@ -148,6 +148,12 @@ class StreamState:
     fast_pointer_min_s: float = 1.2
     fast_pointer_throttle_s: float = 0.6
     last_fast_pointer_t: float = 0.0
+    # Live-mic audio chain toggles (Settings panel). All default to safer
+    # values that don't change behavior unless the user opts in.
+    gain_normalize: bool = False  # boost quiet mic input to a target RMS
+    gain_target_rms: float = 0.1
+    hq_resample: bool = True  # scipy polyphase + anti-alias when downsampling
+    vad_filter_enabled: bool = True  # Silero VAD pre-filter on the backend
     auto_push_threshold: float = AUTO_PUSH_THRESHOLD_DEFAULT
     hero_threshold: float = HERO_THRESHOLD_DEFAULT
 
@@ -195,6 +201,53 @@ def _resample(y: np.ndarray, sr_in: int, sr_out: int = TARGET_SR) -> np.ndarray:
     x_old = np.linspace(0.0, 1.0, num=len(y), endpoint=False)
     x_new = np.linspace(0.0, 1.0, num=n, endpoint=False)
     return np.interp(x_new, x_old, y).astype(np.float32)
+
+
+def _resample_hq(y: np.ndarray, sr_in: int, sr_out: int = TARGET_SR) -> np.ndarray:
+    """Anti-aliased resample via scipy polyphase filter.
+
+    Falls back to linear interp if scipy is not importable. np.interp
+    (our legacy _resample) doesn't apply a low-pass before downsampling,
+    so frequencies above the Nyquist of the target rate alias back into
+    the voice band and confuse Whisper. scipy.signal.resample_poly
+    applies a Kaiser-windowed sinc low-pass automatically.
+    """
+    if sr_in == sr_out or y.size == 0:
+        return y
+    try:
+        from math import gcd
+        from scipy.signal import resample_poly  # type: ignore
+    except ImportError:
+        return _resample(y, sr_in, sr_out)
+    g = gcd(int(sr_in), int(sr_out))
+    up = int(sr_out) // g
+    down = int(sr_in) // g
+    out = resample_poly(y, up, down)
+    return out.astype(np.float32)
+
+
+def _normalize_gain(
+    y: np.ndarray, *, target_rms: float = 0.1,
+    noise_floor: float = 1e-3, max_gain: float = 20.0,
+) -> np.ndarray:
+    """Scale audio so its RMS hits `target_rms`, clipping-safe.
+
+    No-op if signal is below the noise floor (don't amplify pure silence
+    into hallucination territory). Caps the gain at `max_gain` so very
+    quiet input can't blow up into clipping-induced distortion. Final
+    peak is clipped to 0.99 for safety.
+    """
+    if y.size == 0:
+        return y
+    rms = float(np.sqrt(np.mean(y.astype(np.float32) ** 2)))
+    if rms < noise_floor:
+        return y
+    scale = min(target_rms / rms, max_gain)
+    out = (y.astype(np.float32) * scale)
+    peak = float(np.max(np.abs(out))) if out.size else 0.0
+    if peak > 0.99:
+        out = out * (0.99 / peak)
+    return out.astype(np.float32)
 
 
 def _rms(y: np.ndarray) -> float:
@@ -1142,6 +1195,32 @@ def build_app(backend) -> gr.Blocks:
                         minimum=0.5, maximum=5.0, value=2.0, step=0.5,
                         label="Carry-over (s)",
                     )
+                    gr.HTML(
+                        '<div class="card-head" style="margin-top:6px">'
+                        '<span>Audio chain</span>'
+                        '<span class="tag">live mic / upload</span></div>'
+                    )
+                    with gr.Row():
+                        gain_normalize_toggle = gr.Checkbox(
+                            value=False, label="Boost mic gain (target RMS)",
+                            info="Scales quiet mic input up to a target loudness "
+                                 "before Whisper. Useful when you sound quiet to "
+                                 "the laptop mic. No-op on near-silent buffers.",
+                        )
+                        hq_resample_toggle = gr.Checkbox(
+                            value=True, label="High-quality resample",
+                            info="scipy polyphase + anti-alias filter on "
+                                 "downsample (vs naive linear interp). Removes "
+                                 "the high-frequency aliasing that confuses "
+                                 "Whisper.",
+                        )
+                    vad_filter_toggle = gr.Checkbox(
+                        value=True, label="Silero VAD pre-filter",
+                        info="Drops non-speech regions before Whisper sees "
+                             "them. Disable if very quiet voice is being "
+                             "discarded — but expect more hallucinations on "
+                             "silent buffers.",
+                    )
 
                 # -- Session (collapsed) --
                 with gr.Accordion("Session · live stats", open=False):
@@ -1217,6 +1296,25 @@ def build_app(backend) -> gr.Blocks:
                 }
               }
               setInterval(attachHlsIfNeeded, 500);
+
+              // HLS bridge — server writes the playlist path into a hidden
+              // textbox instead of the Audio component (Gradio re-mounts
+              // Audio on every update, which kills browser playback). JS
+              // picks it up and sets audio.src, then attachHlsIfNeeded
+              // handles hls.js attach on the next tick.
+              let _surtHlsBridgeLast = '';
+              function pollHlsBridge() {
+                const ta = document.querySelector(
+                    '#surt-hls-bridge textarea, #surt-hls-bridge input');
+                if (!ta) return;
+                const v = (ta.value || '').trim();
+                if (!v || v === _surtHlsBridgeLast) return;
+                _surtHlsBridgeLast = v;
+                const audio = document.querySelector(
+                    '#surt-player-preview audio');
+                if (audio) { audio.src = v; }
+              }
+              setInterval(pollHlsBridge, 400);
 
               // Mirror the STTM pill from the sidebar into the topbar via cloneNode
               // (safer than innerHTML; the source is trusted Gradio-rendered output).
@@ -1357,6 +1455,13 @@ def build_app(backend) -> gr.Blocks:
             )
             edit_bridge = gr.Textbox(
                 value="", elem_id="surt-edit-bridge", label="edit",
+            )
+            # Streaming routes the HLS playlist path here instead of the
+            # Audio widget — Gradio remounts Audio on every component
+            # update, which kills browser playback. JS polls this bridge
+            # and sets audio.src manually.
+            hls_bridge = gr.Textbox(
+                value="", elem_id="surt-hls-bridge", label="hls",
             )
 
         # ---------- helpers ----------
@@ -1649,7 +1754,14 @@ def build_app(backend) -> gr.Blocks:
 
         def _transcribe(st: StreamState, audio: np.ndarray, sr: int = TARGET_SR) -> str:
             try:
-                text = backend.transcribe(audio, sr) or ""
+                # Backend kwargs are best-effort — older backends may not
+                # accept vad_filter, so retry without it on TypeError.
+                try:
+                    text = backend.transcribe(
+                        audio, sr, vad_filter=st.vad_filter_enabled,
+                    ) or ""
+                except TypeError:
+                    text = backend.transcribe(audio, sr) or ""
             except Exception as e:  # noqa: BLE001
                 print(f"[surt] transcribe failed: {e}")
                 return ""
@@ -1677,6 +1789,18 @@ def build_app(backend) -> gr.Blocks:
             st.hero_threshold = float(hero_th)
             return st, _render_stage(st)
 
+        def on_gain_normalize_change(value, st: StreamState):
+            st.gain_normalize = bool(value)
+            return st
+
+        def on_hq_resample_change(value, st: StreamState):
+            st.hq_resample = bool(value)
+            return st
+
+        def on_vad_filter_change(value, st: StreamState):
+            st.vad_filter_enabled = bool(value)
+            return st
+
         # ---------- mic streaming ----------
 
         def on_stream(chunk, st: StreamState):
@@ -1697,7 +1821,10 @@ def build_app(backend) -> gr.Blocks:
                 return (st, _render_stage(st), _render_action_bar(st),
                         _render_matches(st.matches), st.last_stats_html)
 
-            y = _resample(_to_mono_float32(arr), sr_in)
+            mono = _to_mono_float32(arr)
+            y = _resample_hq(mono, sr_in) if st.hq_resample else _resample(mono, sr_in)
+            if st.gain_normalize:
+                y = _normalize_gain(y, target_rms=st.gain_target_rms)
             st.buffer = np.concatenate([st.buffer, y]) if st.buffer.size else y
 
             commit_samples = int(st.commit_s * TARGET_SR)
@@ -1782,7 +1909,8 @@ def build_app(backend) -> gr.Blocks:
             sr_in, arr = audio
             if arr is None or len(arr) == 0:
                 return (*_full_stage_outputs(st), _stat("upload", "empty audio"))
-            y = _resample(_to_mono_float32(arr), sr_in)
+            mono = _to_mono_float32(arr)
+            y = _resample_hq(mono, sr_in) if st.hq_resample else _resample(mono, sr_in)
             t0 = time.time()
             text = _transcribe(st, y) or ""
             latency_ms = (time.time() - t0) * 1000.0
@@ -2305,7 +2433,7 @@ def build_app(backend) -> gr.Blocks:
             on_play_sync,
             inputs=[player_url, auto_push_toggle, state],
             outputs=[state, stage, primary_cta, matches_html, player_msg,
-                     sttm_status, player_file],
+                     sttm_status, hls_bridge],
         )
 
         for ctrl in (vad_slider, throttle_slider, commit_slider,
@@ -2317,6 +2445,21 @@ def build_app(backend) -> gr.Blocks:
                         hero_slider, state],
                 outputs=[state, stage],
             )
+        gain_normalize_toggle.change(
+            on_gain_normalize_change,
+            inputs=[gain_normalize_toggle, state],
+            outputs=[state],
+        )
+        hq_resample_toggle.change(
+            on_hq_resample_change,
+            inputs=[hq_resample_toggle, state],
+            outputs=[state],
+        )
+        vad_filter_toggle.change(
+            on_vad_filter_change,
+            inputs=[vad_filter_toggle, state],
+            outputs=[state],
+        )
 
     return demo
 
