@@ -38,9 +38,11 @@ from apps.transcribe.retriever import (
     DEFAULT_MODE,
     LOCK_SCORE_FLOOR,
     MODE_LABELS,
+    POINTER_MOVE_FLOOR,
     UNLOCK_SCORE_FLOOR,
     get_retriever,
     score_within_shabad,
+    score_within_shabad_prefix,
     search_shabad_topn,
 )
 from apps.transcribe.sttm_controller import (
@@ -121,6 +123,11 @@ class StreamState:
     # actually firing stream events.
     last_stream_t: float = 0.0
     stream_calls: int = 0
+
+    # Auto-push dedupe across the whole session (mic + URL + file). Reset on
+    # clear / unlock. Lets us push once per shabad transition even though
+    # the same shabad is the top match for many consecutive windows.
+    last_pushed_sid: int | None = None
 
     # Settings
     vad_threshold: float = 0.005
@@ -205,6 +212,39 @@ def _suppress_repeat_hallucination(text: str) -> str:
     return s
 
 
+def _merge_committed(
+    prev: str, new: str, *, max_overlap_words: int = 12
+) -> str:
+    """Append `new` to `prev`, dropping the longest token-level overlap
+    between prev's suffix and new's prefix.
+
+    The live-mic commit-and-carry pipeline transcribes ~2 s of audio twice
+    (the carry-over between adjacent windows). Whisper is context-sensitive,
+    so the two transcriptions differ slightly and naive append produces
+    near-duplicates glued together. This helper merges at the word level
+    (not char level) so we never split a Gurmukhi grapheme cluster
+    mid-word, and caps the search at `max_overlap_words` to keep cost
+    constant on long buffers.
+    """
+    prev = (prev or "").strip()
+    new = (new or "").strip()
+    if not prev:
+        return new
+    if not new:
+        return prev
+    p = prev.split()
+    n = new.split()
+    cap = min(len(p), len(n), max_overlap_words)
+    k = 0
+    for i in range(cap, 0, -1):
+        if p[-i:] == n[:i]:
+            k = i
+            break
+    if k >= len(n):
+        return prev
+    return (prev + " " + " ".join(n[k:])).strip()
+
+
 def _shabad_id_from_hit(hit: dict) -> str | None:
     """Map a UI match dict back to the retriever's internal shabad_id.
 
@@ -250,7 +290,16 @@ def _render_stage(st: StreamState) -> str:
     committed = (st.committed or "").strip()
     tentative = (st.tentative or "").strip()
     top = st.matches[0] if st.matches else None
-    hero_mode = bool(top and float(top.get("score", 0.0)) >= st.hero_threshold)
+    # Keep the hero shabad card visible the entire time we're locked — the
+    # pointer-advance path can drop `ui_score` below `hero_threshold` on weak
+    # signals (0.5 + 0.5*overlap), which would otherwise yank the shabad off
+    # screen and make it look like the pointer isn't moving.
+    hero_mode = bool(
+        top and (
+            float(top.get("score", 0.0)) >= st.hero_threshold
+            or st.locked_shabad_id is not None
+        )
+    )
 
     # Capturing audio but no text yet — show an explicit "listening" state so
     # the user knows the mic is live. Without this, the stage looks identical
@@ -280,7 +329,8 @@ def _render_stage(st: StreamState) -> str:
             '</div>'
         )
 
-    # Hero: matched shabad is the main content, transcript is a footer strip
+    # Hero: matched shabad is the main content, transcript is a footer strip.
+    # Show every line of the shabad with the matched line highlighted.
     if hero_mode and top is not None:
         meta_bits: list[str] = []
         if top.get("writer"):  meta_bits.append(str(top["writer"]))
@@ -288,9 +338,18 @@ def _render_stage(st: StreamState) -> str:
         if top.get("source"):  meta_bits.append(str(top["source"]))
         if top.get("ang"):     meta_bits.append(f'Ang {top["ang"]}')
         meta = " · ".join(meta_bits) or "—"
-        gur = (top.get("gurmukhi") or "").strip() or "(no text)"
         score_pct = int(round(float(top["score"]) * 100))
-        transcript_strip = _transcript_html(committed, tentative, small=True)
+
+        lines: list[str] = list(top.get("full_shabad") or [])
+        highlight_idx = int(top.get("highlight_idx", -1))
+        if not lines:
+            lines = [(top.get("gurmukhi") or "").strip() or "(no text)"]
+            highlight_idx = 0
+        shabad_html = "".join(
+            f'<div class="hero-line{" current" if i == highlight_idx else ""}">{ln}</div>'
+            for i, ln in enumerate(lines)
+        )
+
         lock_badge = ""
         if st.locked_shabad_id:
             lock_badge = (
@@ -298,10 +357,15 @@ def _render_stage(st: StreamState) -> str:
                 'onclick="document.getElementById(\'surt-unlock-btn\').click()" '
                 f'title="Locked on shabad · click to unlock">🔒 locked</button>'
             )
+        # Raw-transcript strip under the hero — committed only (black, small).
+        # Tentative is suppressed in _transcript_html so we never render the
+        # flickery orange; this keeps the ragi's raw ASR visible for debug
+        # without fighting the hero for attention.
+        transcript_strip = _transcript_html(committed, tentative, small=True)
         return (
             '<div class="stage-hero">'
             f'  <div class="hero-label">Matched shabad · {score_pct}% confidence{lock_badge}</div>'
-            f'  <div class="hero-gur" contenteditable="false">{gur}</div>'
+            f'  <div class="hero-shabad">{shabad_html}</div>'
             f'  <div class="hero-meta">{meta}</div>'
             '</div>'
             f'<div class="stage-transcript-strip">{transcript_strip}</div>'
@@ -312,23 +376,19 @@ def _render_stage(st: StreamState) -> str:
 
 
 def _transcript_html(committed: str, tentative: str, *, small: bool = False) -> str:
+    # tentative (orange) is Whisper's rolling guess over the partial buffer —
+    # it flickers and hallucinates on <3s windows, so we only show committed.
+    del tentative
     committed = (committed or "").strip()
-    tentative = (tentative or "").strip()
-    if not committed and not tentative:
+    if not committed:
         return '<div class="surt-line empty">listening…</div>'
-    parts: list[str] = []
-    if committed:
-        # contenteditable span so user can fix ASR mistakes before pushing
-        parts.append(
-            f'<span class="committed" contenteditable="true" '
-            f'spellcheck="false" data-role="committed">{committed}</span>'
-        )
-    if tentative and tentative != committed:
-        if committed:
-            parts.append(" ")
-        parts.append(f'<span class="tentative">{tentative}</span>')
     size_cls = " small" if small else ""
-    return f'<div class="surt-line{size_cls}">{"".join(parts)}</div>'
+    return (
+        f'<div class="surt-line{size_cls}">'
+        f'<span class="committed" contenteditable="true" '
+        f'spellcheck="false" data-role="committed">{committed}</span>'
+        '</div>'
+    )
 
 
 def _sttm_pill(st: StreamState) -> str:
@@ -385,7 +445,7 @@ def _render_matches(matches: list[dict]) -> str:
 
 
 def _render_action_bar(st: StreamState) -> str:
-    """Full action bar: big Push CTA + Clear + Copy + Export."""
+    """Full action bar: big Push CTA + Unlock (when locked) + Clear + Copy + Export."""
     top = st.matches[0] if st.matches else None
     disabled = not top
     if top:
@@ -395,6 +455,19 @@ def _render_action_bar(st: StreamState) -> str:
         label = '↗ Push to STTM'
     cls = "primary-cta" + (" disabled" if disabled else "") + (" ready" if top else "")
     disabled_attr = "disabled" if disabled else ""
+
+    # Unlock: only shown when a shabad is locked. Resets EMA + releases the
+    # lock so the next ASR window ranks fresh (useful on alaap, blended
+    # shabads, or when the ragi moves on).
+    unlock_btn = ""
+    if st.locked_shabad_id:
+        unlock_btn = (
+            '  <button class="secondary-cta unlock-cta" '
+            '    onclick="document.getElementById(\'surt-unlock-btn\').click()" '
+            '    title="Release the shabad lock so the next window ranks fresh">'
+            '    🔓 <span>Unlock</span></button>'
+        )
+
     # Clear has its own secondary CTA (not just an icon) because users asked
     # for it to be obvious — "Start over" between kirtan sessions.
     return (
@@ -402,6 +475,7 @@ def _render_action_bar(st: StreamState) -> str:
         f'  <button class="{cls}" {disabled_attr} '
         f'    onclick="document.getElementById(\'surt-push-real\').click()" '
         f'    title="Press Enter to push the top match">{label}</button>'
+        f'{unlock_btn}'
         f'  <button class="secondary-cta clear-cta" '
         f'    onclick="document.getElementById(\'surt-clear-real\').click()" '
         f'    title="Clear transcript + matches (Esc) — undo-able for 8 s">'
@@ -544,6 +618,28 @@ def build_app(backend) -> gr.Blocks:
         font-size: 48px; line-height: 1.4; color: var(--ink);
         max-width: 900px; margin: 0 auto;
     }
+    /* Full-shabad list view with current-line highlight */
+    .hero-shabad {
+        font-family: "Gurbani Akhar","Noto Sans Gurmukhi", serif;
+        max-width: 920px; margin: 0 auto;
+        display:flex; flex-direction: column; gap: 8px;
+        max-height: 44vh; overflow: auto; padding: 0 8px;
+    }
+    .hero-line {
+        font-size: 22px; line-height: 1.35; color: var(--ink-dim);
+        padding: 6px 14px; border-radius: 10px;
+        transition: all .25s ease;
+    }
+    .hero-line.current {
+        color: var(--ink); font-size: 30px; font-weight: 500;
+        background: linear-gradient(90deg, rgba(230,165,55,0.18), rgba(230,165,55,0.08));
+        border-left: 4px solid var(--amber);
+        padding-left: 14px;
+        box-shadow: inset 0 0 0 1px var(--amber-soft);
+    }
+    body.surt-dark .hero-line.current {
+        background: linear-gradient(90deg, rgba(243,197,106,0.18), rgba(243,197,106,0.05));
+    }
     .hero-meta { font-size: 13px; color: var(--ink-dim); margin-top: 18px; letter-spacing: .3px; }
     .stage-transcript-strip {
         border-top: 1px dashed var(--rule);
@@ -645,6 +741,8 @@ def build_app(backend) -> gr.Blocks:
     .secondary-cta svg { width: 18px; height: 18px; }
     .secondary-cta:hover { border-color: var(--navy); color: var(--navy-deep); }
     .clear-cta:hover { border-color: var(--danger); color: var(--danger); }
+    .unlock-cta { color: var(--amber); }
+    .unlock-cta:hover { border-color: var(--amber); color: #b5651d; }
 
     /* --- toast --- */
     #surt-toast-mount { position: relative; }
@@ -1133,7 +1231,8 @@ def build_app(backend) -> gr.Blocks:
                            document.querySelector('#surt-stage .surt-line');
                 const txt = el ? (el.innerText || '').trim() : '';
                 if (!txt) return;
-                const heroEl = document.querySelector('#surt-stage .hero-gur');
+                const heroEl = document.querySelector('#surt-stage .hero-shabad')
+                              || document.querySelector('#surt-stage .hero-gur');
                 const meta   = document.querySelector('#surt-stage .hero-meta');
                 const blob = new Blob([
                   'Surt — session transcript\\n',
@@ -1241,47 +1340,112 @@ def build_app(backend) -> gr.Blocks:
             return "".join(_stat(k, v) for k, v in rows)
 
         def _locked_hit_to_match(h, ui_score: float) -> dict:
-            """Convert a LockedHit into the match-dict shape the UI expects."""
+            """Convert a LockedHit into the match-dict shape the UI expects.
+
+            Populates full_shabad + highlight_idx so the hero card renders
+            every pangti of the locked shabad with the current one highlighted.
+            """
+            retr = get_retriever()
+            full_lines = retr.get_shabad_lines(h.shabad_id)
+            full_rowids = retr.get_shabad_rowids(h.shabad_id)
+            hi_idx = retr.get_tuk_line_idx(h.shabad_id, h.tuk_row)
+            # STTM needs the pangti's SGGS-wide rowid as verseId. `h.line_rowid`
+            # is populated by score_within_shabad; fall back through the map by
+            # index, then to sttm_id as a last resort.
+            if h.line_rowid is not None:
+                verse_id = int(h.line_rowid)
+            elif 0 <= hi_idx < len(full_rowids):
+                verse_id = int(full_rowids[hi_idx])
+            else:
+                verse_id = h.sttm_id
             return {
                 "shabadId": h.sttm_id,
-                "verseId": h.sttm_id,
+                "verseId": verse_id,
                 "gurmukhi": h.tuk_text,
                 "writer": h.writer,
                 "raag": h.raag,
                 "source": "SGGS",
                 "ang": h.ang,
                 "score": round(float(ui_score), 3),
+                "full_shabad": full_lines,
+                "full_rowids": full_rowids,
+                "highlight_idx": hi_idx,
                 "_raw_score": round(float(h.overlap), 4),
                 "_tuk_score": round(float(h.overlap), 4),
                 "_literal": round(float(h.overlap), 4),
                 "_confirmed": True,
                 "_locked": True,
                 "_tuk_row": h.tuk_row,
+                "_shabad_id_str": h.shabad_id,
             }
 
         def _handle_locked(st: StreamState, query: str) -> bool:
             """Locked-mode pointer update. Returns True if we handled the query
-            (either stayed locked or unlocked on this window)."""
+            (either stayed locked or unlocked on this window).
+
+            Pointer-advance and unlock are decoupled: we trust the lock, so any
+            distinguishable within-shabad overlap is enough to move the pointer
+            (POINTER_MOVE_FLOOR). Unlock still requires sustained low signal
+            (UNLOCK_SCORE_FLOOR for `unlock_misses_target` windows in a row).
+            """
             if not st.locked_shabad_id:
                 return False
-            hits = score_within_shabad(query, st.locked_shabad_id)
-            best = hits[0] if hits else None
-            if best is None or best.overlap < UNLOCK_SCORE_FLOOR:
+            # Pointer: first try a lenient prefix match on the first 1-2 words
+            # of the tail — this lets the highlight advance within 1-2 s of
+            # the ragi starting a new pangti, without waiting for the tail to
+            # accrue enough 4-grams for the overlap scorer. Fall back to the
+            # full overlap scorer for movement and for the unlock decision,
+            # since 4-gram overlap is a more reliable "am I still in this
+            # shabad" signal than prefix.
+            prefix_hits = score_within_shabad_prefix(query, st.locked_shabad_id)
+            prefix_best = prefix_hits[0] if prefix_hits else None
+            prefix_second = (
+                prefix_hits[1].overlap if len(prefix_hits) > 1 else 0.0
+            )
+            overlap_hits = score_within_shabad(query, st.locked_shabad_id)
+            overlap_best = overlap_hits[0] if overlap_hits else None
+
+            # Unlock bookkeeping — runs regardless of whether we move the
+            # pointer. Driven by overlap, not prefix, so a brief silence or
+            # an ornament doesn't unlock us.
+            below_unlock_floor = (
+                overlap_best is None or overlap_best.overlap < UNLOCK_SCORE_FLOOR
+            )
+            if below_unlock_floor:
                 st.unlock_miss_count += 1
                 if st.unlock_miss_count >= st.unlock_misses_target:
                     print(
                         f"[lock] unlock · sid={st.locked_shabad_id} after "
-                        f"{st.unlock_miss_count} misses (best={best.overlap if best else 0.0:.2f})"
+                        f"{st.unlock_miss_count} misses "
+                        f"(best_overlap="
+                        f"{overlap_best.overlap if overlap_best else 0.0:.2f})"
                     )
                     _unlock(st)
                     return False  # fall through to unlocked retrieval
-                # Still within the miss budget — keep the old pointer on screen.
-                return True
-            # Solid in-shabad hit — advance pointer, reset miss counter.
-            st.unlock_miss_count = 0
-            st.locked_tuk_row = best.tuk_row
-            ui_score = 0.5 + 0.5 * min(best.overlap, 1.0)
-            st.matches = [_locked_hit_to_match(best, ui_score)]
+            else:
+                st.unlock_miss_count = 0
+
+            # Pointer advance: prefer a decisive prefix hit (>=0.7 and margin
+            # >=0.2 over runner-up). Otherwise use the overlap scorer.
+            advance = None
+            if (prefix_best is not None
+                    and prefix_best.overlap >= 0.8
+                    and (prefix_best.overlap - prefix_second) >= 0.15):
+                advance = prefix_best
+            elif (overlap_best is not None
+                    and overlap_best.overlap >= POINTER_MOVE_FLOOR):
+                advance = overlap_best
+
+            if advance is not None:
+                prev_row = st.locked_tuk_row
+                st.locked_tuk_row = advance.tuk_row
+                ui_score = 0.5 + 0.5 * min(advance.overlap, 1.0)
+                st.matches = [_locked_hit_to_match(advance, ui_score)]
+                if prev_row != advance.tuk_row:
+                    print(
+                        f"[lock] pointer row {prev_row} → {advance.tuk_row} "
+                        f"(overlap={advance.overlap:.2f})"
+                    )
             return True
 
         def _lock(st: StreamState, sid: str, tuk_row: int | None = None) -> None:
@@ -1301,6 +1465,7 @@ def build_app(backend) -> gr.Blocks:
             st.lock_streak_count = 0
             st.last_top_sid_for_lock = None
             st.last_search_key = ""  # force fresh retrieval on next tick
+            st.last_pushed_sid = None  # allow re-push if ragi returns to same shabad
             if st.retrieval_ema is not None:
                 st.retrieval_ema.reset()
 
@@ -1340,7 +1505,16 @@ def build_app(backend) -> gr.Blocks:
             smooth=True → fold through RetrievalEMA so live windows don't
             bounce between shabads (ignored while locked).
             """
-            text = (st.committed or st.tentative or "").strip()
+            # Query source depends on lock state:
+            #   LOCKED   → prefer tentative (freshest ASR, reflects the current
+            #              pangti being sung) so the pointer advances between
+            #              commits instead of only every ~10 s.
+            #   UNLOCKED → prefer committed (longer, cleaner context needed to
+            #              pick the right shabad out of ~15 k).
+            if st.locked_shabad_id:
+                text = (st.tentative or st.committed or "").strip()
+            else:
+                text = (st.committed or st.tentative or "").strip()
             query = _retrieval_query(text)
             if not query or query == st.last_search_key:
                 return
@@ -1357,6 +1531,16 @@ def build_app(backend) -> gr.Blocks:
             else:
                 st.matches = hits
             _maybe_auto_lock(st, st.matches)
+            if st.matches:
+                top = st.matches[0]
+                print(
+                    f"[retr] sid={top.get('_shabad_id_str')} "
+                    f"sttm={top.get('shabadId')} verseId={top.get('verseId')} "
+                    f"hi_idx={top.get('highlight_idx')} "
+                    f"lines={len(top.get('full_shabad') or [])} "
+                    f"score={top.get('score')} "
+                    f"{'LOCKED' if st.locked_shabad_id else 'unlocked'}"
+                )
 
         def _transcribe(st: StreamState, audio: np.ndarray, sr: int = TARGET_SR) -> str:
             try:
@@ -1424,6 +1608,7 @@ def build_app(backend) -> gr.Blocks:
                     if txt:
                         st.committed = (st.committed + " " + txt).strip()
                         _refresh_matches(st, smooth=True)
+                        _try_auto_push(st)
                 st.buffer = st.buffer[-carry_samples:].copy()
                 st.tentative = ""
 
@@ -1446,6 +1631,7 @@ def build_app(backend) -> gr.Blocks:
                     ("backend", backend_label),
                 ])
                 _refresh_matches(st, smooth=True)
+                _try_auto_push(st)
 
             return (st, _render_stage(st), _render_action_bar(st),
                     _render_matches(st.matches), st.last_stats_html)
@@ -1488,6 +1674,7 @@ def build_app(backend) -> gr.Blocks:
             st.buffer = np.zeros(0, dtype=np.float32)
             st.matches = []
             st.last_search_key = ""
+            st.last_pushed_sid = None
             if st.retrieval_ema is not None:
                 st.retrieval_ema.reset()
             toast = _render_toast("Transcript cleared.", "warn", undo=True)
@@ -1536,6 +1723,34 @@ def build_app(backend) -> gr.Blocks:
             if not st.sttm_connected:
                 s = discover(host=st.sttm_host)
                 st.sttm_host, st.sttm_port, st.sttm_connected = s.host, s.port, s.ok
+
+        def _try_auto_push(st: StreamState) -> None:
+            """Push the current top match to STTM if the session looks ready.
+
+            Gates:
+              • at least one match above the auto-push threshold
+              • STTM reachable (probes once if unknown)
+              • we haven't already pushed this shabadId (dedupes per transition)
+            Called from every path that refreshes matches (live mic, URL
+            stream, file play-sync).
+            """
+            if not st.matches:
+                return
+            top = st.matches[0]
+            if float(top.get("score", 0.0)) < st.auto_push_threshold:
+                return
+            _ensure_sttm(st)
+            if not (st.sttm_connected and st.sttm_port):
+                return
+            sid = top.get("shabadId")
+            if not sid or sid == st.last_pushed_sid:
+                return
+            res = push_hit(st.sttm_host, st.sttm_port, top, pin=st.sttm_pin or None)
+            if res.ok:
+                st.last_pushed_sid = sid
+                print(f"[sttm] pushed sid={sid} · score={top.get('score')}")
+            else:
+                print(f"[sttm] push failed: {res.detail}")
 
         def on_push(st: StreamState):
             _ensure_sttm(st)
