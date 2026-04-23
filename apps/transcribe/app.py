@@ -1663,9 +1663,42 @@ def build_app(backend) -> gr.Blocks:
                 st.buffer = st.buffer[-carry_samples:].copy()
                 st.tentative = ""
 
-            # tentative
+            # tentative — branched by lock state
             now = time.time()
-            if (st.buffer.size >= min_samples
+            if st.locked_shabad_id:
+                # Fast-pointer path: tighter cadence + a fresh 1.5 s tail
+                # (no carry-over contamination), so a new pangti is
+                # detected within ~1.5–2.1 s of the ragi starting it.
+                fast_min_samples = int(st.fast_pointer_min_s * TARGET_SR)
+                fast_tail_samples = int(1.5 * TARGET_SR)
+                if (st.buffer.size >= fast_min_samples
+                        and (now - st.last_fast_pointer_t)
+                            >= st.fast_pointer_throttle_s
+                        and _rms(st.buffer[-fast_min_samples:])
+                            >= st.vad_threshold):
+                    st.last_fast_pointer_t = now
+                    tail = (
+                        st.buffer[-fast_tail_samples:]
+                        if st.buffer.size > fast_tail_samples
+                        else st.buffer
+                    )
+                    t0 = time.time()
+                    tail_text = _transcribe(st, tail)
+                    latency_ms = (time.time() - t0) * 1000.0
+                    if tail_text:
+                        st.tentative = tail_text
+                        _refresh_pointer(st, tail_text)
+                        _try_auto_push(st)
+                    tail_sec = tail.size / TARGET_SR
+                    rtf = latency_ms / 1000.0 / max(tail_sec, 1e-6)
+                    st.last_stats_html = _multi_stat([
+                        ("buffer", f"{st.buffer.size / TARGET_SR:4.1f}s"),
+                        ("fast-tail", f"{tail_sec:4.1f}s"),
+                        ("inference", f"{latency_ms:4.0f} ms"),
+                        ("rtf", f"{rtf:4.2f}×"),
+                        ("backend", backend_label),
+                    ])
+            elif (st.buffer.size >= min_samples
                     and (now - st.last_call_t) >= st.throttle_s
                     and _rms(st.buffer) >= st.vad_threshold):
                 st.last_call_t = now
