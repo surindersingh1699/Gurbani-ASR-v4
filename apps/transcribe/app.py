@@ -149,6 +149,14 @@ class StreamState:
     fast_pointer_min_s: float = 1.2
     fast_pointer_throttle_s: float = 0.6
     last_fast_pointer_t: float = 0.0
+    # Audio length decoded on each fast-pointer tick. 1.5 s is too short for
+    # Whisper (≈1–2 words) and was the main cause of "file mode is accurate
+    # but live mic misses it" — the model's trained context is 30 s, and
+    # the mic fell into a 1.5-s-no-prompt regime whenever a shabad was
+    # locked. 3.0 s gives enough acoustic context; we pair it with an
+    # initial_prompt carrying the previous tail text so Gurmukhi bias is
+    # restored without reintroducing audio carry-over contamination.
+    fast_tail_s: float = 3.0
     # Live-mic audio chain toggles (Settings panel). All default to safer
     # values that don't change behavior unless the user opts in.
     gain_normalize: bool = False  # boost quiet mic input to a target RMS
@@ -1786,13 +1794,15 @@ def build_app(backend) -> gr.Blocks:
             fast_min = int(st.fast_pointer_min_s * TARGET_SR)
             if played_samples < fast_min:
                 return False
-            fast_tail = int(1.5 * TARGET_SR)
+            fast_tail = int(st.fast_tail_s * TARGET_SR)
             s0 = max(0, played_samples - fast_tail)
             tail = audio_buf[s0:played_samples]
             if tail.size < fast_min or _rms(tail) < st.vad_threshold:
                 return False
             st.last_fast_pointer_t = now
-            tail_text = _transcribe(st, tail)
+            # Prior tail's text as initial_prompt — restores Gurmukhi-script
+            # bias for short windows without re-introducing audio overlap.
+            tail_text = _transcribe(st, tail, initial_prompt=st.tentative)
             if not tail_text:
                 return False
             st.tentative = tail_text
@@ -1846,16 +1856,33 @@ def build_app(backend) -> gr.Blocks:
                     f"{'LOCKED' if st.locked_shabad_id else 'unlocked'}"
                 )
 
-        def _transcribe(st: StreamState, audio: np.ndarray, sr: int = TARGET_SR) -> str:
+        def _transcribe(
+            st: StreamState,
+            audio: np.ndarray,
+            sr: int = TARGET_SR,
+            *,
+            initial_prompt: str | None = None,
+        ) -> str:
             try:
                 # Backend kwargs are best-effort — older backends may not
-                # accept vad_filter, so retry without it on TypeError.
+                # accept vad_filter / initial_prompt, so retry without on
+                # TypeError. Whisper caps the prompt at 224 tokens; trim
+                # at the byte level as a cheap upper bound (the tokenizer
+                # will further enforce).
+                prompt = (initial_prompt or "").strip()[-400:] or None
                 try:
                     text = backend.transcribe(
-                        audio, sr, vad_filter=st.vad_filter_enabled,
+                        audio, sr,
+                        vad_filter=st.vad_filter_enabled,
+                        initial_prompt=prompt,
                     ) or ""
                 except TypeError:
-                    text = backend.transcribe(audio, sr) or ""
+                    try:
+                        text = backend.transcribe(
+                            audio, sr, vad_filter=st.vad_filter_enabled,
+                        ) or ""
+                    except TypeError:
+                        text = backend.transcribe(audio, sr) or ""
             except Exception as e:  # noqa: BLE001
                 print(f"[surt] transcribe failed: {e}")
                 return ""
@@ -1903,7 +1930,7 @@ def build_app(backend) -> gr.Blocks:
                 s0 = cursor
                 s1 = s0 + commit_samples
                 window = audio[s0:s1]
-                text = _transcribe(st, window) or ""
+                text = _transcribe(st, window, initial_prompt=merged) or ""
                 if text:
                     merged = _merge_committed(merged, text)
                     if on_window is not None:
@@ -1914,7 +1941,7 @@ def build_app(backend) -> gr.Blocks:
             remainder = audio[cursor:]
             min_samples = int(st.min_transcribe_s * TARGET_SR)
             if remainder.size >= min_samples:
-                text = _transcribe(st, remainder) or ""
+                text = _transcribe(st, remainder, initial_prompt=merged) or ""
                 if text:
                     merged = _merge_committed(merged, text)
                     if on_window is not None:
@@ -1990,7 +2017,11 @@ def build_app(backend) -> gr.Blocks:
             if st.buffer.size > max_samples:
                 commit_slice = st.buffer[:commit_samples]
                 if _rms(commit_slice) >= st.vad_threshold:
-                    txt = _transcribe(st, commit_slice)
+                    # Prior committed text as initial_prompt — keeps script
+                    # + lexicon bias continuous across commit boundaries.
+                    txt = _transcribe(
+                        st, commit_slice, initial_prompt=st.committed,
+                    )
                     if txt:
                         st.committed = (st.committed + " " + txt).strip()
                         _refresh_matches(st, smooth=True)
@@ -2005,7 +2036,7 @@ def build_app(backend) -> gr.Blocks:
                 # (no carry-over contamination), so a new pangti is
                 # detected within ~1.5–2.1 s of the ragi starting it.
                 fast_min_samples = int(st.fast_pointer_min_s * TARGET_SR)
-                fast_tail_samples = int(1.5 * TARGET_SR)
+                fast_tail_samples = int(st.fast_tail_s * TARGET_SR)
                 if (st.buffer.size >= fast_min_samples
                         and (now - st.last_fast_pointer_t)
                             >= st.fast_pointer_throttle_s
@@ -2018,7 +2049,11 @@ def build_app(backend) -> gr.Blocks:
                         else st.buffer
                     )
                     t0 = time.time()
-                    tail_text = _transcribe(st, tail)
+                    # Prior tail's output as initial_prompt — see
+                    # _fast_pointer_scan_played for the rationale.
+                    tail_text = _transcribe(
+                        st, tail, initial_prompt=st.tentative,
+                    )
                     latency_ms = (time.time() - t0) * 1000.0
                     if tail_text:
                         st.tentative = tail_text
@@ -2038,7 +2073,9 @@ def build_app(backend) -> gr.Blocks:
                     and _rms(st.buffer) >= st.vad_threshold):
                 st.last_call_t = now
                 t0 = time.time()
-                st.tentative = _transcribe(st, st.buffer)
+                st.tentative = _transcribe(
+                    st, st.buffer, initial_prompt=st.committed,
+                )
                 latency_ms = (time.time() - t0) * 1000.0
                 buf_sec = st.buffer.size / TARGET_SR
                 rtf = latency_ms / 1000.0 / max(buf_sec, 1e-6)

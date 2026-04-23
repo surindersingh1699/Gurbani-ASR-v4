@@ -75,6 +75,7 @@ class CT2Backend:
     def transcribe(
         self, audio: np.ndarray, sr: int, *,
         vad_filter: bool = True,
+        initial_prompt: str | None = None,
     ) -> str:
         if sr != 16000:
             audio = _resample_to_16k(audio, sr)
@@ -98,6 +99,8 @@ class CT2Backend:
         if vad_filter:
             kwargs["vad_filter"] = True
             kwargs["vad_parameters"] = {"min_silence_duration_ms": 300}
+        if initial_prompt:
+            kwargs["initial_prompt"] = initial_prompt
         segments, _ = self.model.transcribe(audio.astype(np.float32), **kwargs)
         return "".join(seg.text for seg in segments).strip()
 
@@ -113,14 +116,14 @@ class MLXBackend:
 
     def transcribe(
         self, audio: np.ndarray, sr: int, *, vad_filter: bool = True,
+        initial_prompt: str | None = None,
     ) -> str:
         # MLX whisper doesn't expose a Silero VAD stage; vad_filter is
         # accepted for signature parity and currently ignored.
         del vad_filter
         if sr != 16000:
             audio = _resample_to_16k(audio, sr)
-        result = self._mlx_whisper.transcribe(
-            audio.astype(np.float32),
+        kwargs: dict = dict(
             path_or_hf_repo=self._path,
             language="pa",
             task="transcribe",
@@ -128,6 +131,11 @@ class MLXBackend:
             condition_on_previous_text=False,
             fp16=True,
             verbose=None,
+        )
+        if initial_prompt:
+            kwargs["initial_prompt"] = initial_prompt
+        result = self._mlx_whisper.transcribe(
+            audio.astype(np.float32), **kwargs,
         )
         return (result.get("text") or "").strip()
 
@@ -169,6 +177,7 @@ class TorchBackend:
 
     def transcribe(
         self, audio: np.ndarray, sr: int, *, vad_filter: bool = True,
+        initial_prompt: str | None = None,
     ) -> str:
         # transformers WhisperForConditionalGeneration has no built-in VAD;
         # vad_filter is accepted for signature parity and currently ignored.
@@ -176,9 +185,27 @@ class TorchBackend:
         feats = self.processor(
             audio.astype(np.float32), sampling_rate=sr, return_tensors="pt"
         ).input_features.to(self.device, self.dtype)
+        gen_kwargs: dict = dict(max_length=225, num_beams=1)
+        if initial_prompt:
+            try:
+                prompt_ids = self.processor.get_prompt_ids(
+                    initial_prompt, return_tensors="pt",
+                ).to(self.device)
+                gen_kwargs["prompt_ids"] = prompt_ids
+            except Exception as e:  # noqa: BLE001
+                # Older transformers without get_prompt_ids — silently skip
+                # so live transcription still works.
+                print(f"[surt] prompt_ids unsupported ({e}); decoding without prompt")
         with self._torch.inference_mode():
-            ids = self.model.generate(feats, max_length=225, num_beams=1)
-        return self.processor.tokenizer.batch_decode(ids, skip_special_tokens=True)[0].strip()
+            ids = self.model.generate(feats, **gen_kwargs)
+        text = self.processor.tokenizer.batch_decode(
+            ids, skip_special_tokens=True,
+        )[0].strip()
+        # Whisper echoes the prompt into the decoded output — strip it
+        # so callers get only the fresh transcription.
+        if initial_prompt and text.startswith(initial_prompt):
+            text = text[len(initial_prompt):].lstrip()
+        return text
 
     @staticmethod
     def _load_processor(WhisperProcessor, model_id: str, processor_id: str):
