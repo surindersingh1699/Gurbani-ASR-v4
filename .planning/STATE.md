@@ -25,7 +25,7 @@ See: .planning/PROJECT.md (updated 2026-04-04)
 Phase: 4 of 4 -- IMPLEMENTED (runtime validation pending)
 Plan: 1 of 1 in current phase -- COMPLETE
 Status: Phase 4 code is implemented in surt/smoke_test.py and surt/train.py; RunPod execution is pending for end-to-end validation
-Last activity: 2026-04-04 -- Plan 04-01 complete: pre-flight checks, smoke mode, Phase 4 CLI flow, final push hook
+Last activity: 2026-04-23 - Completed quick task 1: Fix transcription quality parity between file and live mic
 
 Progress: [██████████] 100% implementation, runtime validation pending
 
@@ -86,6 +86,12 @@ Recent decisions affecting current work:
 - Average clip duration unknown -- affects max_steps calculation (research flagged 12k vs 36k example discrepancy)
 - transformers v5 API change: `eval_strategy` replaces `evaluation_strategy` -- must use v5 API in implementation
 - Phase 4 runtime validation requires live RunPod GPU time and HuggingFace auth; not executable in this local session
+
+### Quick Tasks Completed
+
+| # | Description | Date | Commit | Directory |
+|---|-------------|------|--------|-----------|
+| 1 | Fix transcription quality parity between file and live mic | 2026-04-23 | 43fe190 | [1-fix-transcription-quality-parity-between](./quick/1-fix-transcription-quality-parity-between/) |
 
 ## Session Continuity
 
