@@ -367,18 +367,21 @@ def _render_stage(st: StreamState) -> str:
                 'onclick="document.getElementById(\'surt-unlock-btn\').click()" '
                 f'title="Locked on shabad · click to unlock">🔒 locked</button>'
             )
-        # Raw-transcript strip under the hero — committed only (black, small).
-        # Tentative is suppressed in _transcript_html so we never render the
-        # flickery orange; this keeps the ragi's raw ASR visible for debug
-        # without fighting the hero for attention.
-        transcript_strip = _transcript_html(committed, tentative, small=True)
+        # Raw-transcript strip under the hero — committed (dark) + tentative
+        # (amber). Sized large enough that the ragi's raw ASR is legible
+        # alongside the matched shabad, so the user can tell whether a wrong
+        # highlight is a Whisper problem or a retrieval problem.
+        transcript_strip = _transcript_html(committed, tentative)
         return (
             '<div class="stage-hero">'
             f'  <div class="hero-label">Matched shabad · {score_pct}% confidence{lock_badge}</div>'
             f'  <div class="hero-shabad">{shabad_html}</div>'
             f'  <div class="hero-meta">{meta}</div>'
             '</div>'
-            f'<div class="stage-transcript-strip">{transcript_strip}</div>'
+            '<div class="stage-transcript-strip">'
+            '  <div class="strip-label">live transcript</div>'
+            f'  {transcript_strip}'
+            '</div>'
         )
 
     # Transcript-only stage (listening, no confident match yet)
@@ -386,12 +389,13 @@ def _render_stage(st: StreamState) -> str:
 
 
 def _transcript_html(committed: str, tentative: str, *, small: bool = False) -> str:
-    # Two layers:
+    # Two layers, both visible:
     #   committed (dark) — finalised commit-window outputs, deduped at the seam
-    #   tentative (muted, italic) — Whisper's rolling guess over the current
-    #     partial buffer. Useful for debugging "is this a Whisper problem or a
-    #     retrieval problem?" — without it, all you see is the matched shabad
-    #     and you can't tell what the model actually heard.
+    #   tentative (amber) — Whisper's rolling guess on the current partial
+    #     buffer. Surfacing this lets the user judge whether a wrong shabad
+    #     pick is a Whisper problem (ASR garbled) or a retrieval problem
+    #     (ASR is right but matcher picked wrong). Without it, all you see
+    #     is the matched shabad and you can't diagnose either way.
     committed = (committed or "").strip()
     tentative = (tentative or "").strip()
     if not committed and not tentative:
@@ -662,9 +666,16 @@ def build_app(backend) -> gr.Blocks:
     .hero-meta { font-size: 13px; color: var(--ink-dim); margin-top: 18px; letter-spacing: .3px; }
     .stage-transcript-strip {
         border-top: 1px dashed var(--rule);
-        padding-top: 12px; margin-top: 8px;
-        max-height: 100px; overflow: auto;
+        padding-top: 14px; margin-top: 10px;
+        max-height: 30vh; overflow: auto;
         text-align: center;
+    }
+    .stage-transcript-strip .surt-line { font-size: 26px; line-height: 1.45; }
+    .stage-transcript-strip .committed { color: var(--ink); }
+    .stage-transcript-strip .tentative { color: var(--amber); opacity: 1; }
+    .stage-transcript-strip .strip-label {
+        font-size: 10px; letter-spacing: .6px; text-transform: uppercase;
+        color: var(--muted); font-weight: 700; margin-bottom: 8px;
     }
 
     /* transcript variant (no confident match yet) */
@@ -1018,16 +1029,12 @@ def build_app(backend) -> gr.Blocks:
                             )
                             player_file = gr.Audio(
                                 sources=["upload"], streaming=False, type="filepath",
-                                label="…or upload a kirtan file",
+                                label="…or upload a kirtan file (use browser controls to play)",
                                 format="wav",
+                                elem_id="surt-player-preview",
                             )
                             load_btn = gr.Button(
                                 "Load source", variant="secondary", size="sm",
-                            )
-                            player_preview = gr.Audio(
-                                label="Playback (use browser controls)",
-                                interactive=False, type="filepath",
-                                elem_id="surt-player-preview",
                             )
                             with gr.Row():
                                 play_sync_btn = gr.Button(
@@ -1557,6 +1564,42 @@ def build_app(backend) -> gr.Blocks:
                 return
             _pointer_advance(st, text)
 
+        def _fast_pointer_scan_played(
+            st: StreamState, audio_buf: np.ndarray, played_s: float,
+        ) -> bool:
+            """Run a fast-pointer scan against the most recent ~1.5 s of
+            audio that has already been "played" (URL stream / file
+            play-sync paths). Same cadence as the live-mic fast-pointer
+            (`fast_pointer_min_s` / `fast_pointer_throttle_s`) so the
+            projector responds within ~2 s of a new pangti starting.
+
+            `played_s` bounds the scan — we never look at audio beyond
+            the playhead, preserving the sync invariant that STTM doesn't
+            run ahead of what the user is hearing. Returns True if Whisper
+            ran (caller can then fire `_try_auto_push`).
+            """
+            if not st.locked_shabad_id:
+                return False
+            now = time.time()
+            if (now - st.last_fast_pointer_t) < st.fast_pointer_throttle_s:
+                return False
+            played_samples = min(int(played_s * TARGET_SR), audio_buf.size)
+            fast_min = int(st.fast_pointer_min_s * TARGET_SR)
+            if played_samples < fast_min:
+                return False
+            fast_tail = int(1.5 * TARGET_SR)
+            s0 = max(0, played_samples - fast_tail)
+            tail = audio_buf[s0:played_samples]
+            if tail.size < fast_min or _rms(tail) < st.vad_threshold:
+                return False
+            st.last_fast_pointer_t = now
+            tail_text = _transcribe(st, tail)
+            if not tail_text:
+                return False
+            st.tentative = tail_text
+            _refresh_pointer(st, tail_text)
+            return True
+
         def _refresh_matches(st: StreamState, *, smooth: bool = False) -> None:
             """Refresh matches.
 
@@ -1668,7 +1711,7 @@ def build_app(backend) -> gr.Blocks:
                 if _rms(commit_slice) >= st.vad_threshold:
                     txt = _transcribe(st, commit_slice)
                     if txt:
-                        st.committed = _merge_committed(st.committed, txt)
+                        st.committed = (st.committed + " " + txt).strip()
                         _refresh_matches(st, smooth=True)
                         _try_auto_push(st)
                 st.buffer = st.buffer[-carry_samples:].copy()
@@ -1947,13 +1990,12 @@ def build_app(backend) -> gr.Blocks:
             try:
                 path, audio = prepare_source(url, file_path)
             except Exception as e:  # noqa: BLE001
-                return (st, gr.update(), gr.update(),
+                return (st, gr.update(),
                         _stat("player", f"load failed — {e}"))
             st.player_path = str(path)
             st.player_audio = audio
             dur = audio.size / TARGET_SR
             return (st,
-                    gr.update(value=str(path)),
                     gr.update(value=str(path)),
                     _stat("player", f"loaded · {dur:4.1f}s"))
 
@@ -2040,7 +2082,7 @@ def build_app(backend) -> gr.Blocks:
                     window = buf[s0:s1]
                     text = _transcribe(st, window)
                     if text:
-                        st.committed = _merge_committed(st.committed, text)
+                        st.committed = (st.committed + " " + text).strip()
                         _refresh_matches(st, smooth=True)
                         if (auto_push and st.matches
                                 and st.sttm_connected and st.sttm_port
@@ -2091,7 +2133,7 @@ def build_app(backend) -> gr.Blocks:
                 s1 = s0 + window_samples
                 text = _transcribe(st, buf[s0:s1])
                 if text:
-                    st.committed = _merge_committed(st.committed, text)
+                    st.committed = (st.committed + " " + text).strip()
                     _refresh_matches(st, smooth=True)
                 transcribed_up_to = s1
 
@@ -2099,7 +2141,7 @@ def build_app(backend) -> gr.Blocks:
                 tail = buf[transcribed_up_to:]
                 text = _transcribe(st, tail)
                 if text:
-                    st.committed = _merge_committed(st.committed, text)
+                    st.committed = (st.committed + " " + text).strip()
                     _refresh_matches(st, smooth=True)
 
             yield (st, _render_stage(st), _render_action_bar(st),
@@ -2150,7 +2192,7 @@ def build_app(backend) -> gr.Blocks:
 
                 text = _transcribe(st, chunk)
                 if text:
-                    st.committed = _merge_committed(st.committed, text)
+                    st.committed = (st.committed + " " + text).strip()
                     _refresh_matches(st, smooth=True)
                     if (auto_push and st.matches and st.sttm_connected and st.sttm_port
                             and float(st.matches[0].get("score", 0.0))
@@ -2248,7 +2290,7 @@ def build_app(backend) -> gr.Blocks:
         load_btn.click(
             on_load_source,
             inputs=[player_url, player_file, state],
-            outputs=[state, player_preview, player_file, player_msg],
+            outputs=[state, player_file, player_msg],
         )
         play_sync_btn.click(
             None, None, None,
@@ -2263,7 +2305,7 @@ def build_app(backend) -> gr.Blocks:
             on_play_sync,
             inputs=[player_url, auto_push_toggle, state],
             outputs=[state, stage, primary_cta, matches_html, player_msg,
-                     sttm_status, player_preview],
+                     sttm_status, player_file],
         )
 
         for ctrl in (vad_slider, throttle_slider, commit_slider,
