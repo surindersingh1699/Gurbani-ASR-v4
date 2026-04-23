@@ -7,3 +7,7 @@ mlx-whisper>=0.4.2; platform_system == "Darwin" and platform_machine == "arm64"
 # Fallback backend (works everywhere; uses MPS on Mac).
 transformers>=4.44
 torch>=2.3
+# STTM Desktop control — attach to its Electron renderer over CDP.
+# No `playwright install` needed: we connect_over_cdp() to an existing
+# Chromium, we never launch one.
+playwright>=1.43
