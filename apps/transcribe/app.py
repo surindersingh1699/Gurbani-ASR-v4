@@ -386,19 +386,28 @@ def _render_stage(st: StreamState) -> str:
 
 
 def _transcript_html(committed: str, tentative: str, *, small: bool = False) -> str:
-    # tentative (orange) is Whisper's rolling guess over the partial buffer —
-    # it flickers and hallucinates on <3s windows, so we only show committed.
-    del tentative
+    # Two layers:
+    #   committed (dark) — finalised commit-window outputs, deduped at the seam
+    #   tentative (muted, italic) — Whisper's rolling guess over the current
+    #     partial buffer. Useful for debugging "is this a Whisper problem or a
+    #     retrieval problem?" — without it, all you see is the matched shabad
+    #     and you can't tell what the model actually heard.
     committed = (committed or "").strip()
-    if not committed:
+    tentative = (tentative or "").strip()
+    if not committed and not tentative:
         return '<div class="surt-line empty">listening…</div>'
     size_cls = " small" if small else ""
-    return (
-        f'<div class="surt-line{size_cls}">'
-        f'<span class="committed" contenteditable="true" '
-        f'spellcheck="false" data-role="committed">{committed}</span>'
-        '</div>'
-    )
+    parts: list[str] = [f'<div class="surt-line{size_cls}">']
+    if committed:
+        parts.append(
+            f'<span class="committed" contenteditable="true" '
+            f'spellcheck="false" data-role="committed">{committed}</span>'
+        )
+    if tentative and tentative != committed:
+        sep = " " if committed else ""
+        parts.append(f'<span class="tentative">{sep}{tentative}</span>')
+    parts.append('</div>')
+    return "".join(parts)
 
 
 def _sttm_pill(st: StreamState) -> str:
