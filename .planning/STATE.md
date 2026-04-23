@@ -25,7 +25,7 @@ See: .planning/PROJECT.md (updated 2026-04-04)
 Phase: 4 of 4 -- IMPLEMENTED (runtime validation pending)
 Plan: 1 of 1 in current phase -- COMPLETE
 Status: Phase 4 code is implemented in surt/smoke_test.py and surt/train.py; RunPod execution is pending for end-to-end validation
-Last activity: 2026-04-23 - Completed quick task 1: Fix transcription quality parity between file and live mic
+Last activity: 2026-04-23 - Completed quick task 2: Switch STTM push to offline CDP controller (Playwright)
 
 Progress: [██████████] 100% implementation, runtime validation pending
 
@@ -92,6 +92,7 @@ Recent decisions affecting current work:
 | # | Description | Date | Commit | Directory |
 |---|-------------|------|--------|-----------|
 | 1 | Fix transcription quality parity between file and live mic | 2026-04-23 | 43fe190 | [1-fix-transcription-quality-parity-between](./quick/1-fix-transcription-quality-parity-between/) |
+| 2 | Switch STTM push to real sttm.co/control socket.io protocol | 2026-04-23 | 878f2bb | [2-switch-sttm-push-to-real-sttm-co-control](./quick/2-switch-sttm-push-to-real-sttm-co-control/) |
 
 ## Session Continuity
 
