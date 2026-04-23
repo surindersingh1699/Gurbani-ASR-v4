@@ -1381,24 +1381,18 @@ def build_app(backend) -> gr.Blocks:
                 "_shabad_id_str": h.shabad_id,
             }
 
-        def _handle_locked(st: StreamState, query: str) -> bool:
-            """Locked-mode pointer update. Returns True if we handled the query
-            (either stayed locked or unlocked on this window).
+        def _pointer_advance(st: StreamState, query: str) -> bool:
+            """Advance `st.locked_tuk_row` to the best within-shabad match
+            for `query`. Side-effects: updates `st.locked_tuk_row` and
+            `st.matches`. Returns True iff `st.matches` was rewritten.
 
-            Pointer-advance and unlock are decoupled: we trust the lock, so any
-            distinguishable within-shabad overlap is enough to move the pointer
-            (POINTER_MOVE_FLOOR). Unlock still requires sustained low signal
-            (UNLOCK_SCORE_FLOOR for `unlock_misses_target` windows in a row).
+            No unlock side-effects — see `_check_unlock` for that. Splitting
+            the two lets the fast-pointer path run pointer updates on a
+            short fresh-tail buffer without burning unlock-misses on what
+            is normal sub-tuk noise.
             """
             if not st.locked_shabad_id:
                 return False
-            # Pointer: first try a lenient prefix match on the first 1-2 words
-            # of the tail — this lets the highlight advance within 1-2 s of
-            # the ragi starting a new pangti, without waiting for the tail to
-            # accrue enough 4-grams for the overlap scorer. Fall back to the
-            # full overlap scorer for movement and for the unlock decision,
-            # since 4-gram overlap is a more reliable "am I still in this
-            # shabad" signal than prefix.
             prefix_hits = score_within_shabad_prefix(query, st.locked_shabad_id)
             prefix_best = prefix_hits[0] if prefix_hits else None
             prefix_second = (
@@ -1407,28 +1401,6 @@ def build_app(backend) -> gr.Blocks:
             overlap_hits = score_within_shabad(query, st.locked_shabad_id)
             overlap_best = overlap_hits[0] if overlap_hits else None
 
-            # Unlock bookkeeping — runs regardless of whether we move the
-            # pointer. Driven by overlap, not prefix, so a brief silence or
-            # an ornament doesn't unlock us.
-            below_unlock_floor = (
-                overlap_best is None or overlap_best.overlap < UNLOCK_SCORE_FLOOR
-            )
-            if below_unlock_floor:
-                st.unlock_miss_count += 1
-                if st.unlock_miss_count >= st.unlock_misses_target:
-                    print(
-                        f"[lock] unlock · sid={st.locked_shabad_id} after "
-                        f"{st.unlock_miss_count} misses "
-                        f"(best_overlap="
-                        f"{overlap_best.overlap if overlap_best else 0.0:.2f})"
-                    )
-                    _unlock(st)
-                    return False  # fall through to unlocked retrieval
-            else:
-                st.unlock_miss_count = 0
-
-            # Pointer advance: prefer a decisive prefix hit (>=0.7 and margin
-            # >=0.2 over runner-up). Otherwise use the overlap scorer.
             advance = None
             if (prefix_best is not None
                     and prefix_best.overlap >= 0.8
@@ -1438,16 +1410,66 @@ def build_app(backend) -> gr.Blocks:
                     and overlap_best.overlap >= POINTER_MOVE_FLOOR):
                 advance = overlap_best
 
-            if advance is not None:
-                prev_row = st.locked_tuk_row
-                st.locked_tuk_row = advance.tuk_row
-                ui_score = 0.5 + 0.5 * min(advance.overlap, 1.0)
-                st.matches = [_locked_hit_to_match(advance, ui_score)]
-                if prev_row != advance.tuk_row:
-                    print(
-                        f"[lock] pointer row {prev_row} → {advance.tuk_row} "
-                        f"(overlap={advance.overlap:.2f})"
-                    )
+            if advance is None:
+                return False
+
+            prev_row = st.locked_tuk_row
+            st.locked_tuk_row = advance.tuk_row
+            ui_score = 0.5 + 0.5 * min(advance.overlap, 1.0)
+            st.matches = [_locked_hit_to_match(advance, ui_score)]
+            if prev_row != advance.tuk_row:
+                print(
+                    f"[lock] pointer row {prev_row} → {advance.tuk_row} "
+                    f"(overlap={advance.overlap:.2f})"
+                )
+            return True
+
+        def _check_unlock(st: StreamState, query: str) -> bool:
+            """Run the unlock decision against `query`. Returns True iff
+            we just unlocked. Side-effects: bumps or resets
+            `st.unlock_miss_count`; calls `_unlock` when threshold hit.
+
+            Driven by overlap (not prefix), so a brief silence or an
+            ornament doesn't unlock — only sustained absence of any
+            within-shabad 4-gram support does.
+            """
+            if not st.locked_shabad_id:
+                return False
+            overlap_hits = score_within_shabad(query, st.locked_shabad_id)
+            overlap_best = overlap_hits[0] if overlap_hits else None
+            below_unlock_floor = (
+                overlap_best is None or overlap_best.overlap < UNLOCK_SCORE_FLOOR
+            )
+            if not below_unlock_floor:
+                st.unlock_miss_count = 0
+                return False
+            st.unlock_miss_count += 1
+            if st.unlock_miss_count < st.unlock_misses_target:
+                return False
+            print(
+                f"[lock] unlock · sid={st.locked_shabad_id} after "
+                f"{st.unlock_miss_count} misses "
+                f"(best_overlap="
+                f"{overlap_best.overlap if overlap_best else 0.0:.2f})"
+            )
+            _unlock(st)
+            return True
+
+        def _handle_locked(st: StreamState, query: str) -> bool:
+            """Locked-mode pointer + unlock orchestrator. Returns True if
+            we handled the query (either stayed locked or unlocked).
+
+            Pointer-advance and unlock are decoupled by design: we trust
+            the lock, so any distinguishable within-shabad overlap is
+            enough to move the pointer (POINTER_MOVE_FLOOR), while unlock
+            still requires sustained low signal (UNLOCK_SCORE_FLOOR for
+            `unlock_misses_target` consecutive windows).
+            """
+            if not st.locked_shabad_id:
+                return False
+            if _check_unlock(st, query):
+                return False  # fall through to unlocked retrieval
+            _pointer_advance(st, query)
             return True
 
         def _lock(st: StreamState, sid: str, tuk_row: int | None = None) -> None:
