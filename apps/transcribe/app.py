@@ -1006,6 +1006,7 @@ def build_app(backend) -> gr.Blocks:
                             upload = gr.Audio(
                                 sources=["upload"], streaming=False, type="numpy",
                                 label="Audio file (wav/mp3/m4a)", show_label=False,
+                                format="wav",
                             )
                             upload_btn = gr.Button(
                                 "Transcribe file", variant="primary", size="sm",
@@ -1018,6 +1019,7 @@ def build_app(backend) -> gr.Blocks:
                             player_file = gr.Audio(
                                 sources=["upload"], streaming=False, type="filepath",
                                 label="…or upload a kirtan file",
+                                format="wav",
                             )
                             load_btn = gr.Button(
                                 "Load source", variant="secondary", size="sm",

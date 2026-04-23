@@ -129,7 +129,24 @@ def push_shabad(
     verse_id: int,
     line_count: int = 1,
     pin: Optional[str] = None,
+    home_id: Optional[int] = None,
 ) -> STTMStatus:
+    """Push a shabad / line to STTM Desktop's bani-control endpoint.
+
+    Two payload modes (matching the format STTM Desktop's controller
+    expects, cross-referenced against `surindersingh1699/sttm-automate`):
+
+    - **Open shabad** — first push for a given shabad. `home_id` defaults
+      to `verse_id` (= the line we want to land on, usually the first
+      tuk), `line_count` defaults to 1.
+    - **Advance line within shabad** — caller passes `home_id` = SGGS
+      rowid of the shabad's FIRST line and `line_count` = 1-based
+      position of the current line within the shabad. Without these
+      STTM keeps re-rendering the shabad as if line 1 were the target,
+      which is why the projector highlight stays stuck on line 1 even
+      when our pointer has moved.
+    """
+    home = int(home_id) if home_id is not None else int(verse_id)
     payload: dict = {
         "type": "shabad",
         "shabadId": int(shabad_id),
@@ -137,7 +154,7 @@ def push_shabad(
         "verseId": int(verse_id),
         "lineCount": int(line_count),
         "highlight": int(verse_id),
-        "homeId": int(verse_id),
+        "homeId": home,
     }
     if pin:
         payload["pin"] = str(pin)
@@ -146,18 +163,47 @@ def push_shabad(
             f"http://{host}:{port}/api/bani-control", payload, timeout=3.0
         )
         if 200 <= status < 300:
-            return STTMStatus(True, host, port, f"pushed shabad {shabad_id}")
+            return STTMStatus(
+                True, host, port,
+                f"pushed shabad={shabad_id} verse={verse_id} "
+                f"home={home} line={line_count}",
+            )
         return STTMStatus(False, host, port, f"http {status}")
     except Exception as e:  # noqa: BLE001
         return STTMStatus(False, host, port, f"error: {e}")
 
 
 def push_hit(host: str, port: int, hit: dict, pin: Optional[str] = None) -> STTMStatus:
+    """Push a UI match dict to STTM.
+
+    Locked-mode hits carry `full_rowids` (every line's SGGS rowid in
+    order) and `highlight_idx` (position of the current pointer within
+    `full_rowids`). When both are present we send the advance-style
+    payload (`homeId = full_rowids[0]`, `lineCount = highlight_idx + 1`)
+    so STTM moves the highlight rather than re-anchoring at line 1.
+    Unlocked-mode hits fall back to the open-shabad payload.
+    """
     sid = hit.get("shabadId")
     vid = hit.get("verseId") or sid
     if not sid:
         return STTMStatus(False, host, port, "hit missing shabadId")
-    return push_shabad(host, port, int(sid), int(vid), pin=pin)
+
+    full_rowids = hit.get("full_rowids") or []
+    highlight_idx = hit.get("highlight_idx", -1)
+    home_id: Optional[int] = None
+    line_count = 1
+    if (
+        full_rowids
+        and isinstance(highlight_idx, int)
+        and 0 <= highlight_idx < len(full_rowids)
+    ):
+        home_id = int(full_rowids[0])
+        line_count = highlight_idx + 1
+
+    return push_shabad(
+        host, port, int(sid), int(vid),
+        line_count=line_count, home_id=home_id, pin=pin,
+    )
 
 
 def push_transcript_as_shabad(
