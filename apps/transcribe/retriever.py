@@ -51,6 +51,12 @@ LOCK_SCORE_FLOOR = float(os.environ.get("SURT_LOCK_SCORE", "0.80"))
 # shabads (~0.4) counts as a miss, while singing through any verse of the
 # locked shabad reliably stays near 1.0.
 UNLOCK_SCORE_FLOOR = float(os.environ.get("SURT_UNLOCK_FLOOR", "0.50"))
+# Once locked, we trust the shabad pick — any distinguishable within-shabad
+# overlap is enough to advance the pointer to the best-matching pangti, even
+# if it's too weak to keep us locked long-term. Decoupling these two floors
+# lets the pointer follow the ragi on early/partial ASR while unlock still
+# requires sustained low signal.
+POINTER_MOVE_FLOOR = float(os.environ.get("SURT_POINTER_MOVE", "0.15"))
 # Literal-overlap rerank: blend `LITERAL_WEIGHT * char-4gram overlap` into the
 # best-cosine base. MuRIL ranks semantic paraphrases highly; without this, a
 # paraphrase can outrank the exact tuk the ragi sang. We score with the
@@ -61,16 +67,16 @@ UNLOCK_SCORE_FLOOR = float(os.environ.get("SURT_UNLOCK_FLOOR", "0.50"))
 LITERAL_WEIGHT = float(os.environ.get("SURT_LITERAL_WEIGHT", "0.40"))
 
 # Retrieval modes — user-selectable in the UI.
-MODE_SEMANTIC_LITERAL = "semantic+literal"   # MuRIL + 2-layer FAISS + 4gram rerank (default)
+MODE_SEMANTIC_LITERAL = "semantic+literal"   # MuRIL + 2-layer FAISS + 4gram rerank
 MODE_SEMANTIC = "semantic"                    # MuRIL + 2-layer FAISS (no literal rerank)
-MODE_LITERAL = "literal"                      # char-4gram Jaccard over all tuks (no MuRIL)
+MODE_LITERAL = "literal"                      # char-4gram Jaccard over all tuks (no MuRIL, default)
 MODE_BANIDB = "banidb"                        # remote BaniDB API (online)
 DEFAULT_MODE = MODE_SEMANTIC_LITERAL
 
 MODE_LABELS: dict[str, str] = {
-    MODE_SEMANTIC_LITERAL: "Semantic + literal (MuRIL + 4gram rerank) — default",
+    MODE_LITERAL:          "Literal only (char-4gram Jaccard; no MuRIL) — default",
+    MODE_SEMANTIC_LITERAL: "Semantic + literal (MuRIL + 4gram rerank)",
     MODE_SEMANTIC:         "Semantic only (MuRIL; no literal bonus)",
-    MODE_LITERAL:          "Literal only (char-4gram Jaccard; no MuRIL)",
     MODE_BANIDB:           "BaniDB remote API (online only)",
 }
 
@@ -119,6 +125,10 @@ class LockedHit:
     writer: str
     raag: str
     sttm_id: Optional[int]
+    # SGGS-wide sequential `lines.rowid` for this tuk — what STTM's push API
+    # wants as `verseId` to highlight a specific pangti (sttm_id alone only
+    # opens the shabad). None only if the tuk couldn't be mapped to a row.
+    line_rowid: Optional[int] = None
 
 
 class ShabadRetriever:
@@ -142,6 +152,12 @@ class ShabadRetriever:
 
         print(f"[retriever] loading sttm_id map from {db_path}...")
         self._sttm_id_of: dict[str, int] = _load_sttm_id_map(db_path)
+        # Per-shabad ordered list of `lines.rowid` for type_id != 2 (pangti +
+        # rahao + manglacharan). tuk_meta excludes sirlekh headers, so with
+        # that same filter the i-th element lines up with the i-th tuk in
+        # `_tuks_by_shabad[sid]`. We use this to map a matched tuk back to the
+        # SGGS-wide integer STTM expects as verseId/highlight/homeId.
+        self._line_rowids: dict[str, list[int]] = _load_line_rowids(db_path)
 
         self._shabad_info: dict[str, ShabadRow] = {}
         for row in self._shabad_meta.values():
@@ -186,6 +202,28 @@ class ShabadRetriever:
     def name(self) -> str:
         return "local-faiss-2layer"
 
+    def get_shabad_lines(self, shabad_id: str) -> list[str]:
+        """All tuk texts for a shabad in sequential order. Empty if unknown."""
+        return [text for _row, text in self._tuks_by_shabad.get(shabad_id, [])]
+
+    def get_tuk_line_idx(self, shabad_id: str, tuk_row: int) -> int:
+        """Index of a tuk_row within its shabad's ordered tuks. -1 if absent."""
+        for i, (row, _text) in enumerate(self._tuks_by_shabad.get(shabad_id, [])):
+            if row == tuk_row:
+                return i
+        return -1
+
+    def get_line_rowid(self, shabad_id: str, line_idx: int) -> Optional[int]:
+        """`lines.rowid` of the idx-th tuk in a shabad. None if out of range."""
+        rows = self._line_rowids.get(shabad_id) or []
+        if 0 <= line_idx < len(rows):
+            return int(rows[line_idx])
+        return None
+
+    def get_shabad_rowids(self, shabad_id: str) -> list[int]:
+        """Ordered list of `lines.rowid` for every tuk in a shabad."""
+        return list(self._line_rowids.get(shabad_id, []))
+
     # ------- mode dispatch -------
 
     def search_topn(
@@ -207,6 +245,74 @@ class ShabadRetriever:
         # Both semantic modes use the 2-layer FAISS cascade.
         use_literal = (mode == MODE_SEMANTIC_LITERAL)
         return self._search_semantic(text, n, use_literal=use_literal)
+
+    # ------- lock-mode lenient prefix scorer -------
+
+    def score_within_shabad_prefix(
+        self, text: str, shabad_id: str, *, n_words: int = 2,
+    ) -> list[LockedHit]:
+        """Fast pointer update while locked: match the tail's first N words.
+
+        Ragi almost always starts a pangti with its first two words — scoring
+        on first-N-words lets the highlight advance on a partial buffer
+        (~1-2 s) instead of waiting for the full-tuk overlap scorer to accrue
+        enough 4-grams. Used as the primary lock-mode scorer; the overlap
+        scorer stays as a fallback / tiebreaker.
+
+        Score for each tuk:
+            lcp_chars / max(len(q_prefix), 1)
+            + 0.2 bonus if the first word matches word-for-word.
+        """
+        text = (text or "").strip()
+        if not text:
+            return []
+        tuks = self._tuks_by_shabad.get(shabad_id)
+        if not tuks:
+            return []
+
+        q_words = text.split()[:n_words]
+        if not q_words:
+            return []
+        q_prefix = " ".join(q_words)
+        q_first = q_words[0]
+
+        info = self._shabad_info.get(shabad_id)
+        writer = info.writer if info else ""
+        raag = info.raag if info else ""
+        ang = info.ang if info else 0
+        sttm_id = info.sttm_id if info else None
+        rowids = self._line_rowids.get(shabad_id) or []
+
+        out: list[LockedHit] = []
+        for idx, (row, tuk_text) in enumerate(tuks):
+            tk_words = tuk_text.split()[:n_words]
+            if not tk_words:
+                continue
+            tk_prefix = " ".join(tk_words)
+            # Longest common char prefix
+            lcp = 0
+            for a, b in zip(q_prefix, tk_prefix):
+                if a != b:
+                    break
+                lcp += 1
+            base = lcp / max(len(q_prefix), 1)
+            bonus = 0.2 if tk_words[0] == q_first else 0.0
+            score = min(1.0, base + bonus)
+            if score <= 0.0:
+                continue
+            out.append(LockedHit(
+                shabad_id=shabad_id,
+                tuk_row=row,
+                tuk_text=tuk_text,
+                overlap=float(score),
+                ang=ang,
+                writer=writer,
+                raag=raag,
+                sttm_id=sttm_id,
+                line_rowid=int(rowids[idx]) if idx < len(rowids) else None,
+            ))
+        out.sort(key=lambda h: h.overlap, reverse=True)
+        return out
 
     # ------- lock-mode pointer (score within a single shabad) -------
 
@@ -235,8 +341,9 @@ class ShabadRetriever:
         ang = info.ang if info else 0
         sttm_id = info.sttm_id if info else None
 
+        rowids = self._line_rowids.get(shabad_id) or []
         out: list[LockedHit] = []
-        for row, tuk_text in tuks:
+        for idx, (row, tuk_text) in enumerate(tuks):
             ov = _overlap(q_grams, _char_4grams(tuk_text))
             if ov <= 0.0:
                 continue
@@ -249,6 +356,7 @@ class ShabadRetriever:
                 writer=writer,
                 raag=raag,
                 sttm_id=sttm_id,
+                line_rowid=int(rowids[idx]) if idx < len(rowids) else None,
             ))
         out.sort(key=lambda h: h.overlap, reverse=True)
         return out
@@ -302,20 +410,39 @@ class ShabadRetriever:
                     raag=tm.get("raag", ""),
                     ang=int(tm.get("ang", 0) or 0),
                 )
+            full_lines: list[str] = []
+            highlight_idx = -1
+            for i, (tr, tt) in enumerate(self._tuks_by_shabad.get(sid, [])):
+                full_lines.append(tt)
+                if tr == row:
+                    highlight_idx = i
+            full_rowids = self._line_rowids.get(sid, [])
+            # STTM needs the pangti's SGGS-wide rowid as verseId. Fall back to
+            # sttm_id only as a last resort so at least the shabad opens.
+            verse_id = (
+                int(full_rowids[highlight_idx])
+                if 0 <= highlight_idx < len(full_rowids)
+                else info.sttm_id
+            )
+
             out.append({
                 "shabadId": info.sttm_id,
-                "verseId": info.sttm_id,
+                "verseId": verse_id,
                 "gurmukhi": tm.get("text", info.first_tuk),
                 "writer": info.writer,
                 "raag": info.raag,
                 "source": "SGGS",
                 "ang": info.ang,
                 "score": round(float(j), 3),
+                "full_shabad": full_lines,
+                "full_rowids": list(full_rowids),
+                "highlight_idx": highlight_idx,
                 "_raw_score": round(float(j), 4),
                 "_tuk_score": 0.0,
                 "_literal": round(float(j), 4),
                 "_confirmed": False,
                 "_tuk_row": int(row),
+                "_shabad_id_str": sid,
             })
         return out
 
@@ -407,20 +534,41 @@ class ShabadRetriever:
             ui_score = 0.5 + 0.5 * (score - lo) / span
             ui_score = max(0.0, min(1.0, float(ui_score)))
 
+            # Full shabad text for the hero card — list of lines in order. We
+            # also compute which index within that list corresponds to the
+            # matched tuk so the renderer can highlight it.
+            full_lines: list[str] = []
+            highlight_idx = -1
+            sid_tuks = self._tuks_by_shabad.get(sid, [])
+            for i, (tr, tt) in enumerate(sid_tuks):
+                full_lines.append(tt)
+                if tr == tuk_row:
+                    highlight_idx = i
+            full_rowids = self._line_rowids.get(sid, [])
+            verse_id = (
+                int(full_rowids[highlight_idx])
+                if 0 <= highlight_idx < len(full_rowids)
+                else info.sttm_id
+            )
+
             out.append({
                 "shabadId": info.sttm_id,
-                "verseId": info.sttm_id,
+                "verseId": verse_id,
                 "gurmukhi": matched_tuk_text,
                 "writer": info.writer,
                 "raag": info.raag,
                 "source": "SGGS",
                 "ang": info.ang,
                 "score": round(ui_score, 3),
+                "full_shabad": full_lines,
+                "full_rowids": list(full_rowids),
+                "highlight_idx": highlight_idx,
                 "_raw_score": round(float(score), 4),
                 "_tuk_score": round(float(tuk_score), 4),
                 "_literal": round(float(literal), 4),
                 "_confirmed": sid == confirmed_sid,
                 "_tuk_row": int(tuk_row) if tuk_row >= 0 else -1,
+                "_shabad_id_str": sid,
             })
         return out
 
@@ -456,6 +604,20 @@ def score_within_shabad(query: str, shabad_id: str) -> list[LockedHit]:
         return []
 
 
+def score_within_shabad_prefix(
+    query: str, shabad_id: str, *, n_words: int = 2,
+) -> list[LockedHit]:
+    """Lenient prefix-mode scoring — advances the pointer on the first 1-2
+    words of the tail, so highlight moves as soon as a new pangti starts."""
+    try:
+        return get_retriever().score_within_shabad_prefix(
+            query, shabad_id, n_words=n_words,
+        )
+    except Exception as e:  # noqa: BLE001
+        print(f"[retriever] prefix scoring failed: {e}")
+        return []
+
+
 def _load_pkl(path: Path):
     with open(path, "rb") as f:
         return pickle.load(f)  # noqa: S301 - repo-local index artifacts
@@ -467,5 +629,27 @@ def _load_sttm_id_map(db_path: Path) -> dict[str, int]:
         cur = con.cursor()
         cur.execute("SELECT id, sttm_id FROM shabads WHERE sttm_id IS NOT NULL")
         return {sid: int(sttm) for sid, sttm in cur.fetchall() if sttm is not None}
+    finally:
+        con.close()
+
+
+def _load_line_rowids(db_path: Path) -> dict[str, list[int]]:
+    """`shabad_id -> ordered list of lines.rowid` (excluding sirlekh headers).
+
+    type_id == 2 is the shabad's header line; tuk_meta skips those, so we
+    filter here too. Verified 1:1 per-shabad alignment with `_tuks_by_shabad`
+    across all 5,544 shabads in the repo-bundled SGGS db.
+    """
+    con = sqlite3.connect(str(db_path))
+    try:
+        cur = con.cursor()
+        cur.execute(
+            "SELECT rowid, shabad_id FROM lines "
+            "WHERE type_id != 2 ORDER BY rowid"
+        )
+        out: dict[str, list[int]] = {}
+        for rowid, sid in cur.fetchall():
+            out.setdefault(sid, []).append(int(rowid))
+        return out
     finally:
         con.close()
