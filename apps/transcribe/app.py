@@ -1198,14 +1198,14 @@ def build_app(backend) -> gr.Blocks:
                     gr.HTML(
                         '<div class="card-head" style="margin-top:6px">'
                         '<span>Audio chain</span>'
-                        '<span class="tag">live mic / upload</span></div>'
+                        '<span class="tag">live mic / upload / player</span></div>'
                     )
                     with gr.Row():
                         gain_normalize_toggle = gr.Checkbox(
-                            value=False, label="Boost mic gain (target RMS)",
-                            info="Scales quiet mic input up to a target loudness "
-                                 "before Whisper. Useful when you sound quiet to "
-                                 "the laptop mic. No-op on near-silent buffers.",
+                            value=False, label="Boost input gain (target RMS)",
+                            info="Scales quiet audio up to a target loudness "
+                                 "before Whisper (mic + player paths). "
+                                 "No-op on near-silent buffers.",
                         )
                         hq_resample_toggle = gr.Checkbox(
                             value=True, label="High-quality resample",
@@ -1264,6 +1264,36 @@ def build_app(backend) -> gr.Blocks:
             </div>
             <script>
             (function(){
+              // Force "raw" mic capture for better ASR parity between
+              // live mic and pre-recorded/file playback (especially when
+              // using BlackHole/system-audio routing).
+              try {
+                if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia
+                    && !window._surtPatchedGUM) {
+                  const _origGetUserMedia =
+                    navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
+                  navigator.mediaDevices.getUserMedia = function(constraints) {
+                    try {
+                      if (constraints && constraints.audio) {
+                        const audioCfg = (typeof constraints.audio === 'object')
+                          ? constraints.audio
+                          : {};
+                        constraints = Object.assign({}, constraints, {
+                          audio: Object.assign({}, audioCfg, {
+                            echoCancellation: false,
+                            noiseSuppression: false,
+                            autoGainControl: false,
+                            channelCount: 1,
+                          }),
+                        });
+                      }
+                    } catch (e) {}
+                    return _origGetUserMedia(constraints);
+                  };
+                  window._surtPatchedGUM = true;
+                }
+              } catch (e) {}
+
               // --- HLS playback glue ---
               // When `player_preview` gets a file path ending in .m3u8, attach
               // hls.js and start playing. Server paces transcription to wall-
@@ -1767,6 +1797,66 @@ def build_app(backend) -> gr.Blocks:
                 return ""
             return _suppress_repeat_hallucination(text)
 
+        def _chunked_decode(
+            st: StreamState,
+            audio: np.ndarray,
+            *,
+            on_window=None,
+        ) -> str:
+            """Mic-parity chunked decode for non-streaming paths.
+
+            Replicates on_stream's commit-and-carry: 10-s commit windows
+            with 2-s carry-over merged via _merge_committed so Whisper
+            never enters a window at a hard mid-word boundary. This is the
+            shared helper used by on_upload (and a candidate for future
+            batch decode paths). Streaming consumers (_on_stream_url,
+            on_play_sync) can't call this directly because they need to
+            pace windows to wall-clock, but they replicate the same
+            carry-over + merge semantics inline.
+
+            Torch backend truncates any single call to 30 s, so routing
+            long uploads through this helper is what closes that bug.
+
+            on_window(text, s0, s1) is called after each committed window
+            so callers can run per-window side effects if needed.
+
+            Returns the fully merged transcript.
+            """
+            if audio is None or audio.size == 0:
+                return ""
+            commit_samples = int(st.commit_s * TARGET_SR)
+            max_samples = int(st.max_window_s * TARGET_SR)
+            carry_samples = int(st.carry_over_s * TARGET_SR)
+            # Short clip: one-shot is fine (and faster).
+            if audio.size <= max_samples:
+                text = _transcribe(st, audio) or ""
+                if text and on_window is not None:
+                    on_window(text, 0, audio.size)
+                return text
+            merged = ""
+            cursor = 0
+            while cursor + commit_samples <= audio.size:
+                s0 = cursor
+                s1 = s0 + commit_samples
+                window = audio[s0:s1]
+                text = _transcribe(st, window) or ""
+                if text:
+                    merged = _merge_committed(merged, text)
+                    if on_window is not None:
+                        on_window(text, s0, s1)
+                # Advance by commit - carry so next window sees 2 s overlap.
+                cursor = s1 - carry_samples
+            # Drain the tail if >= min_transcribe_s of audio remains.
+            remainder = audio[cursor:]
+            min_samples = int(st.min_transcribe_s * TARGET_SR)
+            if remainder.size >= min_samples:
+                text = _transcribe(st, remainder) or ""
+                if text:
+                    merged = _merge_committed(merged, text)
+                    if on_window is not None:
+                        on_window(text, cursor, audio.size)
+            return merged
+
         def _full_stage_outputs(st: StreamState, toast_html: str = ""):
             return (
                 st,
@@ -1911,8 +2001,16 @@ def build_app(backend) -> gr.Blocks:
                 return (*_full_stage_outputs(st), _stat("upload", "empty audio"))
             mono = _to_mono_float32(arr)
             y = _resample_hq(mono, sr_in) if st.hq_resample else _resample(mono, sr_in)
+            if st.gain_normalize:
+                y = _normalize_gain(y, target_rms=st.gain_target_rms)
             t0 = time.time()
-            text = _transcribe(st, y) or ""
+            # Route through _chunked_decode so long uploads use the mic's
+            # commit-and-carry windowing. This also closes the Torch-backend
+            # 30-s truncation bug: a single backend.transcribe call feeds
+            # audio to Whisper's fixed 30-s mel extractor, losing everything
+            # past second 30. _chunked_decode splits into 10-s commit windows
+            # with 2-s overlap and merges via _merge_committed.
+            text = _chunked_decode(st, y)
             latency_ms = (time.time() - t0) * 1000.0
             st.committed = text
             st.tentative = ""
@@ -1990,11 +2088,24 @@ def build_app(backend) -> gr.Blocks:
                 s = discover(host=st.sttm_host)
                 st.sttm_host, st.sttm_port, st.sttm_connected = s.host, s.port, s.ok
 
+        def _auto_push_score_ok(st: StreamState, top: dict) -> bool:
+            """Decide whether the top hit is strong enough to push.
+
+            In LOCKED mode we bypass the UI score threshold and trust the
+            in-shabad pointer signal (`_literal` overlap). Otherwise we keep
+            the user-configured auto-push floor.
+            """
+            if st.locked_shabad_id:
+                literal = float(top.get("_literal", top.get("_raw_score", 0.0)))
+                return literal >= POINTER_MOVE_FLOOR
+            return float(top.get("score", 0.0)) >= st.auto_push_threshold
+
         def _try_auto_push(st: StreamState) -> None:
             """Push the current top match to STTM if the session looks ready.
 
             Gates:
-              • at least one match above the auto-push threshold
+              • at least one match that passes the push score gate
+                (auto-push threshold when unlocked; pointer overlap floor when locked)
               • STTM reachable (probes once if unknown)
               • we haven't already pushed this (shabadId, verseId) pair
             Dedup is on the *pair* so locked-pointer advances re-push and
@@ -2004,7 +2115,7 @@ def build_app(backend) -> gr.Blocks:
             if not st.matches:
                 return
             top = st.matches[0]
-            if float(top.get("score", 0.0)) < st.auto_push_threshold:
+            if not _auto_push_score_ok(st, top):
                 return
             _ensure_sttm(st)
             if not (st.sttm_connected and st.sttm_port):
@@ -2142,6 +2253,7 @@ def build_app(backend) -> gr.Blocks:
             st.tentative = ""
             st.matches = []
             st.last_search_key = ""
+            st.last_fast_pointer_t = 0.0
             if st.retrieval_ema is not None:
                 st.retrieval_ema.reset()
             if auto_push:
@@ -2166,15 +2278,18 @@ def build_app(backend) -> gr.Blocks:
 
             window_s = 10.0
             window_samples = int(window_s * TARGET_SR)
+            # 2-s carry-over between windows so Whisper never enters a
+            # window at a hard mid-word boundary. Matches mic's commit-and-
+            # carry; st.committed dedupe runs via _merge_committed.
+            carry_samples = int(st.carry_over_s * TARGET_SR)
             buf = np.zeros(0, dtype=np.float32)
             transcribed_up_to = 0
-            last_pushed_key: tuple[int, int] | None = None
             t_start = time.time()
             playlist_emitted = False
             # Browser playback only starts ~2-3 s after we signal it (first
             # segment must land, hls.js must attach), so offset the "playhead"
             # a little so the server doesn't race ahead of real playback.
-            PLAYHEAD_LAG_S = 3.0
+            PLAYHEAD_LAG_S = float(os.environ.get("SURT_PLAYHEAD_LAG_S", "3.0"))
 
             for chunk, meta in stream_audio_16k(url, hls_dir=hls_dir):
                 if meta.error:
@@ -2184,6 +2299,10 @@ def build_app(backend) -> gr.Blocks:
                            _sttm_pill(st), gr.update())
                     return
                 if chunk.size > 0:
+                    if st.gain_normalize:
+                        chunk = _normalize_gain(
+                            chunk, target_rms=st.gain_target_rms,
+                        )
                     buf = np.concatenate([buf, chunk])
 
                 # Emit the playlist path to the browser as soon as a .ts segment
@@ -2199,7 +2318,10 @@ def build_app(backend) -> gr.Blocks:
                 # Wall-clock gate: only transcribe windows whose end-time has
                 # been "played" by the browser. This is the sync invariant —
                 # STTM push is never ahead of the browser playhead.
-                playhead_s = max(0.0, time.time() - t_start - PLAYHEAD_LAG_S)
+                playhead_s = max(
+                    0.0,
+                    min(buf.size / TARGET_SR, time.time() - t_start - PLAYHEAD_LAG_S),
+                )
                 while (
                     buf.size - transcribed_up_to >= window_samples
                     and (transcribed_up_to + window_samples) / TARGET_SR
@@ -2210,22 +2332,18 @@ def build_app(backend) -> gr.Blocks:
                     window = buf[s0:s1]
                     text = _transcribe(st, window)
                     if text:
-                        st.committed = (st.committed + " " + text).strip()
+                        st.committed = _merge_committed(st.committed, text)
                         _refresh_matches(st, smooth=True)
-                        if (auto_push and st.matches
-                                and st.sttm_connected and st.sttm_port
-                                and float(st.matches[0].get("score", 0.0))
-                                    >= st.auto_push_threshold):
-                            top = st.matches[0]
-                            sid = top.get("shabadId")
-                            vid = top.get("verseId") or sid
-                            if sid:
-                                key = (int(sid), int(vid))
-                                if key != last_pushed_key:
-                                    push_hit(st.sttm_host, st.sttm_port, top,
-                                             pin=st.sttm_pin or None)
-                                    last_pushed_key = key
-                    transcribed_up_to = s1
+                        if auto_push:
+                            _try_auto_push(st)
+                    # Retain the last 2 s of this window as carry-over for
+                    # the next decode so Whisper sees the tail of the
+                    # previous phrase; _merge_committed drops the duplicate.
+                    transcribed_up_to = s1 - carry_samples
+
+                fast_ran = _fast_pointer_scan_played(st, buf, playhead_s)
+                if auto_push and fast_ran:
+                    _try_auto_push(st)
 
                 pos_s = buf.size / TARGET_SR
                 yield (st, _render_stage(st), _render_action_bar(st),
@@ -2245,7 +2363,13 @@ def build_app(backend) -> gr.Blocks:
             # Drain: stream finished, but browser may still be playing.
             # Keep transcribing paced to playhead until we're caught up.
             while buf.size - transcribed_up_to >= window_samples:
-                playhead_s = time.time() - t_start - PLAYHEAD_LAG_S
+                playhead_s = max(
+                    0.0,
+                    min(buf.size / TARGET_SR, time.time() - t_start - PLAYHEAD_LAG_S),
+                )
+                fast_ran = _fast_pointer_scan_played(st, buf, playhead_s)
+                if auto_push and fast_ran:
+                    _try_auto_push(st)
                 target_end = (transcribed_up_to + window_samples) / TARGET_SR
                 wait = target_end - playhead_s
                 if wait > 0:
@@ -2261,16 +2385,21 @@ def build_app(backend) -> gr.Blocks:
                 s1 = s0 + window_samples
                 text = _transcribe(st, buf[s0:s1])
                 if text:
-                    st.committed = (st.committed + " " + text).strip()
+                    st.committed = _merge_committed(st.committed, text)
                     _refresh_matches(st, smooth=True)
-                transcribed_up_to = s1
+                    if auto_push:
+                        _try_auto_push(st)
+                # Same 2-s carry-over as the live loop above.
+                transcribed_up_to = s1 - carry_samples
 
             if buf.size - transcribed_up_to >= 3 * TARGET_SR:
                 tail = buf[transcribed_up_to:]
                 text = _transcribe(st, tail)
                 if text:
-                    st.committed = (st.committed + " " + text).strip()
+                    st.committed = _merge_committed(st.committed, text)
                     _refresh_matches(st, smooth=True)
+                    if auto_push:
+                        _try_auto_push(st)
 
             yield (st, _render_stage(st), _render_action_bar(st),
                    _render_matches(st.matches),
@@ -2299,55 +2428,76 @@ def build_app(backend) -> gr.Blocks:
                 _ensure_sttm(st)
 
             window_s = 10.0
-            step_s = 10.0
             sr = TARGET_SR
             total = audio.size
+            total_s = total / sr
+            window_samples = int(window_s * sr)
+            # 2-s carry-over between windows — mic-parity commit-and-carry.
+            carry_samples = int(st.carry_over_s * sr)
+            transcribed_up_to = 0
             t_start = time.time()
-            i = 0
-            last_pushed_key: tuple[int, int] | None = None
+            status_every_s = 0.4
+            poll_s = 0.2
+            last_status_t = 0.0
 
             st.committed = ""
             st.tentative = ""
             st.matches = []
             st.last_search_key = ""
+            st.last_fast_pointer_t = 0.0
             if st.retrieval_ema is not None:
                 st.retrieval_ema.reset()
 
-            while i * step_s * sr < total:
-                s0 = int(i * step_s * sr)
-                s1 = min(total, s0 + int(window_s * sr))
-                chunk = audio[s0:s1]
+            while True:
+                played_s = min(total_s, max(0.0, time.time() - t_start))
+                played_samples = min(total, int(played_s * sr))
 
-                text = _transcribe(st, chunk)
+                while transcribed_up_to + window_samples <= played_samples:
+                    s0 = transcribed_up_to
+                    s1 = s0 + window_samples
+                    chunk = audio[s0:s1]
+                    if st.gain_normalize:
+                        chunk = _normalize_gain(
+                            chunk, target_rms=st.gain_target_rms,
+                        )
+                    text = _transcribe(st, chunk)
+                    if text:
+                        st.committed = _merge_committed(st.committed, text)
+                        _refresh_matches(st, smooth=True)
+                        if auto_push:
+                            _try_auto_push(st)
+                    # Retain the last 2 s of this window as carry-over so
+                    # the next decode sees the tail of the previous phrase.
+                    transcribed_up_to = s1 - carry_samples
+
+                fast_ran = _fast_pointer_scan_played(st, audio, played_s)
+                if auto_push and fast_ran:
+                    _try_auto_push(st)
+
+                now = time.time()
+                if (now - last_status_t) >= status_every_s or played_s >= total_s:
+                    msg = _stat("player", f"sync {played_s:4.1f}s / {total_s:4.1f}s")
+                    yield (st, _render_stage(st), _render_action_bar(st),
+                           _render_matches(st.matches), msg, _sttm_pill(st),
+                           gr.update())
+                    last_status_t = now
+
+                if played_s >= total_s:
+                    break
+                time.sleep(poll_s)
+
+            if total - transcribed_up_to >= 3 * sr:
+                tail = audio[transcribed_up_to:]
+                if st.gain_normalize:
+                    tail = _normalize_gain(
+                        tail, target_rms=st.gain_target_rms,
+                    )
+                text = _transcribe(st, tail)
                 if text:
-                    st.committed = (st.committed + " " + text).strip()
+                    st.committed = _merge_committed(st.committed, text)
                     _refresh_matches(st, smooth=True)
-                    if (auto_push and st.matches and st.sttm_connected and st.sttm_port
-                            and float(st.matches[0].get("score", 0.0))
-                                >= st.auto_push_threshold):
-                        top = st.matches[0]
-                        sid = top.get("shabadId")
-                        vid = top.get("verseId") or sid
-                        if sid:
-                            key = (int(sid), int(vid))
-                            if key != last_pushed_key:
-                                push_hit(st.sttm_host, st.sttm_port, top,
-                                         pin=st.sttm_pin or None)
-                                last_pushed_key = key
-
-                pos_s = (i + 1) * step_s
-                dur_s = total / sr
-                msg = _stat("player", f"sync {pos_s:4.1f}s / {dur_s:4.1f}s")
-                yield (st, _render_stage(st), _render_action_bar(st),
-                       _render_matches(st.matches), msg, _sttm_pill(st),
-                       gr.update())
-
-                elapsed = time.time() - t_start
-                target = (i + 1) * step_s
-                sleep_for = target - elapsed
-                if sleep_for > 0:
-                    time.sleep(sleep_for)
-                i += 1
+                    if auto_push:
+                        _try_auto_push(st)
 
             yield (st, _render_stage(st), _render_action_bar(st),
                    _render_matches(st.matches),
