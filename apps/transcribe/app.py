@@ -46,11 +46,8 @@ from apps.transcribe.retriever import (
     search_shabad_topn,
 )
 from apps.transcribe.sttm_controller import (
-    CANDIDATE_PORTS,
     STTMStatus,
-    discover,
-    push_hit,
-    push_transcript_as_shabad,
+    get_controller,
 )
 
 TARGET_SR = 16_000
@@ -108,9 +105,13 @@ class StreamState:
         '<div class="surt-stat-row"><span>status</span><b>waiting…</b></div>'
     )
 
-    # STTM
-    sttm_host: str = "127.0.0.1"
-    sttm_port: int | None = None
+    # STTM (CDP path — see apps/transcribe/sttm_controller.py)
+    # Host/port fields are gone: we no longer probe REST ports. The real
+    # connection lives inside the process-wide STTMController singleton
+    # (see get_controller()). sttm_pin is kept only so persisted
+    # ~/.surt/config.json round-trips cleanly across versions; the CDP
+    # path doesn't use a PIN. sttm_connected mirrors the controller's
+    # is_connected() at the time we last rendered status.
     sttm_pin: str = ""
     sttm_connected: bool = False
 
@@ -166,6 +167,16 @@ class StreamState:
     # advances, with content-based auto-unlock when the ragi moves away.
     locked_shabad_id: str | None = None
     locked_tuk_row: int | None = None  # current pointer row within the shabad
+    # Candidate row switch state (locked-mode anti-jitter): require the same
+    # new row to win on consecutive scans before we move the pointer.
+    pointer_candidate_row: int | None = None
+    pointer_candidate_hits: int = 0
+    pointer_confirm_hits: int = 2
+    # Movement guards: don't jump far on weak evidence; require a small margin
+    # over the current row before switching.
+    pointer_big_jump_max: int = 4
+    pointer_big_jump_overlap: float = 0.75
+    pointer_takeover_margin: float = 0.04
     lock_streak_target: int = LOCK_STREAK_DEFAULT
     lock_streak_count: int = 0
     last_top_sid_for_lock: str | None = None
@@ -468,17 +479,28 @@ def _transcript_html(committed: str, tentative: str, *, small: bool = False) -> 
 
 
 def _sttm_pill(st: StreamState) -> str:
-    if st.sttm_connected and st.sttm_port:
+    """Small status pill in the header — reads the live controller state.
+
+    Reads `get_controller().is_connected()` at render time so the pill
+    always reflects reality (CDP is cheap to poll). `st.sttm_connected`
+    is kept in sync as a cached mirror so generator paths that can't
+    call get_controller() in their tight loop still get a plausible
+    snapshot.
+    """
+    ctrl = get_controller()
+    connected = ctrl.is_connected()
+    st.sttm_connected = connected
+    if connected:
         return (
             f'<button class="sttm-pill ok" '
             f'onclick="document.getElementById(\'surt-connect-real\').click()" '
-            f'title="Re-check STTM connection">'
-            f'<span class="dot"></span>STTM · <b>:{st.sttm_port}</b></button>'
+            f'title="Re-check STTM control connection">'
+            f'<span class="dot"></span>STTM · <b>CDP :9222</b></button>'
         )
     return (
         '<button class="sttm-pill off" '
         'onclick="document.getElementById(\'surt-connect-real\').click()" '
-        'title="Retry STTM discovery">'
+        'title="Launch STTM with --remote-debugging-port=9222 and click to retry">'
         '<span class="dot"></span>STTM offline · retry</button>'
     )
 
@@ -1122,22 +1144,25 @@ def build_app(backend) -> gr.Blocks:
                 # -- STTM card --
                 with gr.Column(elem_classes=["surt-card"]):
                     gr.HTML('<div class="card-head"><span>STTM Projection</span>'
-                            '<span class="tag">optional</span></div>')
+                            '<span class="tag">CDP · offline</span></div>')
                     sttm_status = gr.HTML(_sttm_pill(StreamState()))
-                    with gr.Row():
-                        sttm_host = gr.Textbox(
-                            value="127.0.0.1", label="Host", placeholder="127.0.0.1", scale=2,
-                        )
-                        sttm_port = gr.Textbox(
-                            value="", label="Port",
-                            placeholder=f"auto ({CANDIDATE_PORTS[0]})", scale=1,
-                        )
-                        sttm_pin = gr.Textbox(
-                            value=saved_pin, label="PIN",
-                            placeholder="e.g. 3563",
-                            info="Bani Controller PIN — saved locally after connect",
-                            scale=1,
-                        )
+                    gr.HTML(
+                        '<div class="surt-stat-row" style="padding-top:0">'
+                        '<span>Launch STTM with '
+                        '<code>--remote-debugging-port=9222</code> '
+                        'and click <b>Connect</b> to attach. No internet '
+                        'required.</span></div>'
+                    )
+                    # PIN kept (hidden) purely so persisted ~/.surt/config.json
+                    # still round-trips across versions. The CDP path itself
+                    # doesn't use a PIN.
+                    sttm_pin = gr.Textbox(
+                        value=saved_pin, label="PIN (legacy)",
+                        placeholder="(unused on CDP path)",
+                        info="Preserved for config round-trip only — "
+                             "STTM CDP doesn't require a PIN.",
+                        visible=False,
+                    )
 
                 # -- Settings (collapsed) --
                 with gr.Accordion("Settings · retrieval + streaming", open=False):
@@ -1572,9 +1597,44 @@ def build_app(backend) -> gr.Blocks:
                 advance = overlap_best
 
             if advance is None:
+                st.pointer_candidate_row = None
+                st.pointer_candidate_hits = 0
                 return False
 
             prev_row = st.locked_tuk_row
+            # Anti-jitter for LOCKED mode:
+            #  1) New row must beat current row by a margin.
+            #  2) Large row jumps need stronger overlap.
+            #  3) Row switches are confirmed across consecutive scans.
+            if prev_row is not None and advance.tuk_row != prev_row:
+                prev_overlap = 0.0
+                for h in overlap_hits:
+                    if h.tuk_row == prev_row:
+                        prev_overlap = float(h.overlap)
+                        break
+                if advance.overlap < (prev_overlap + st.pointer_takeover_margin):
+                    st.pointer_candidate_row = None
+                    st.pointer_candidate_hits = 0
+                    return False
+
+                jump = abs(advance.tuk_row - prev_row)
+                if jump > st.pointer_big_jump_max and advance.overlap < st.pointer_big_jump_overlap:
+                    st.pointer_candidate_row = None
+                    st.pointer_candidate_hits = 0
+                    return False
+
+                # Very strong match can switch immediately.
+                if advance.overlap < 0.9:
+                    if st.pointer_candidate_row == advance.tuk_row:
+                        st.pointer_candidate_hits += 1
+                    else:
+                        st.pointer_candidate_row = advance.tuk_row
+                        st.pointer_candidate_hits = 1
+                    if st.pointer_candidate_hits < st.pointer_confirm_hits:
+                        return False
+
+            st.pointer_candidate_row = None
+            st.pointer_candidate_hits = 0
             st.locked_tuk_row = advance.tuk_row
             ui_score = 0.5 + 0.5 * min(advance.overlap, 1.0)
             st.matches = [_locked_hit_to_match(advance, ui_score)]
@@ -1636,6 +1696,8 @@ def build_app(backend) -> gr.Blocks:
         def _lock(st: StreamState, sid: str, tuk_row: int | None = None) -> None:
             st.locked_shabad_id = sid
             st.locked_tuk_row = tuk_row
+            st.pointer_candidate_row = None
+            st.pointer_candidate_hits = 0
             st.unlock_miss_count = 0
             st.lock_streak_count = 0
             st.last_top_sid_for_lock = sid
@@ -1647,6 +1709,8 @@ def build_app(backend) -> gr.Blocks:
         def _unlock(st: StreamState) -> None:
             st.locked_shabad_id = None
             st.locked_tuk_row = None
+            st.pointer_candidate_row = None
+            st.pointer_candidate_hits = 0
             st.unlock_miss_count = 0
             st.lock_streak_count = 0
             st.last_top_sid_for_lock = None
@@ -2039,6 +2103,8 @@ def build_app(backend) -> gr.Blocks:
             st.matches = []
             st.last_search_key = ""
             st.last_pushed_key = None
+            st.pointer_candidate_row = None
+            st.pointer_candidate_hits = 0
             if st.retrieval_ema is not None:
                 st.retrieval_ema.reset()
             toast = _render_toast("Transcript cleared.", "warn", undo=True)
@@ -2059,34 +2125,45 @@ def build_app(backend) -> gr.Blocks:
 
         # ---------- STTM ----------
 
-        def on_connect(host: str, port_str: str, pin: str, st: StreamState):
-            host = (host or "127.0.0.1").strip()
+        def on_connect(pin: str, st: StreamState):
+            """Attach (or re-attach) the shared STTMController over CDP.
+
+            The PIN field is preserved for config round-trip only; the
+            CDP path does not authenticate with a PIN. If STTM isn't
+            running with --remote-debugging-port, the controller's
+            last_error() carries the actionable message we show the user.
+            """
             new_pin = (pin or "").strip()
             if new_pin != st.sttm_pin:
                 st.sttm_pin = new_pin
                 cfg = _load_config()
                 cfg["sttm_pin"] = new_pin
                 _save_config(cfg)
-            if port_str and port_str.strip().isdigit():
-                ports: tuple[int, ...] = (int(port_str.strip()),)
+            ctrl = get_controller()
+            # Force a fresh attach — disconnect if we're attached to a
+            # stale renderer (STTM was killed/relaunched), then reconnect.
+            if not ctrl.is_connected():
+                ctrl.connect()
+            ok = ctrl.is_connected()
+            st.sttm_connected = ok
+            if ok:
+                toast = _render_toast(
+                    "STTM control OK (CDP :9222)", "success",
+                )
             else:
-                ports = CANDIDATE_PORTS
-            status: STTMStatus = discover(host=host, ports=ports)
-            st.sttm_host = status.host
-            st.sttm_port = status.port
-            st.sttm_connected = status.ok
-            pin_suffix = f" · PIN {st.sttm_pin}" if st.sttm_pin else ""
-            toast = _render_toast(
-                f"STTM connected on :{status.port}{pin_suffix}" if status.ok
-                else "STTM not reachable — open Bani Controller",
-                "success" if status.ok else "error",
-            )
+                detail = ctrl.last_error() or (
+                    "STTM not reachable — launch with "
+                    "`open -a 'SikhiToTheMax' --args --remote-debugging-port=9222`"
+                )
+                toast = _render_toast(detail, "error")
             return st, _sttm_pill(st), toast
 
         def _ensure_sttm(st: StreamState) -> None:
-            if not st.sttm_connected:
-                s = discover(host=st.sttm_host)
-                st.sttm_host, st.sttm_port, st.sttm_connected = s.host, s.port, s.ok
+            """Refresh cached connection flag (no REST probing)."""
+            ctrl = get_controller()
+            if not ctrl.is_connected():
+                ctrl.connect()
+            st.sttm_connected = ctrl.is_connected()
 
         def _auto_push_score_ok(st: StreamState, top: dict) -> bool:
             """Decide whether the top hit is strong enough to push.
@@ -2118,7 +2195,7 @@ def build_app(backend) -> gr.Blocks:
             if not _auto_push_score_ok(st, top):
                 return
             _ensure_sttm(st)
-            if not (st.sttm_connected and st.sttm_port):
+            if not st.sttm_connected:
                 return
             sid = top.get("shabadId")
             vid = top.get("verseId") or sid
@@ -2127,7 +2204,7 @@ def build_app(backend) -> gr.Blocks:
             key = (int(sid), int(vid))
             if key == st.last_pushed_key:
                 return
-            res = push_hit(st.sttm_host, st.sttm_port, top, pin=st.sttm_pin or None)
+            res = get_controller().push_hit(top)
             if res.ok:
                 st.last_pushed_key = key
                 print(f"[sttm] pushed sid={sid} verseId={vid} · score={top.get('score')}")
@@ -2136,23 +2213,30 @@ def build_app(backend) -> gr.Blocks:
 
         def on_push(st: StreamState):
             _ensure_sttm(st)
-            if not (st.sttm_connected and st.sttm_port):
-                toast = _render_toast(
-                    "STTM not reachable — open Bani Controller.", "error")
+            if not st.sttm_connected:
+                ctrl_msg = get_controller().last_error() or (
+                    "STTM not reachable — launch with "
+                    "--remote-debugging-port=9222."
+                )
+                toast = _render_toast(ctrl_msg, "error")
                 return st, toast, _sttm_pill(st), _stat("STTM", "offline")
-            pin = st.sttm_pin or None
             if st.matches:
                 top = st.matches[0]
-                res = push_hit(st.sttm_host, st.sttm_port, top, pin=pin)
-                toast = _render_toast(f"Pushed: {res.detail}", "success")
+                res = get_controller().push_hit(top)
+                kind = "success" if res.ok else "error"
+                toast = _render_toast(
+                    (f"Pushed: {res.detail}" if res.ok
+                     else f"Push failed: {res.detail}"),
+                    kind,
+                )
                 return st, toast, _sttm_pill(st), _stat("STTM", res.detail)
-            text = (st.committed or st.tentative or "").strip()
-            if not text:
-                toast = _render_toast("Nothing to push yet.", "warn")
-                return st, toast, _sttm_pill(st), _stat("STTM", "nothing")
-            res = push_transcript_as_shabad(st.sttm_host, st.sttm_port, text, pin=pin)
-            toast = _render_toast(f"Pushed raw text: {res.detail}", "success")
-            return st, toast, _sttm_pill(st), _stat("STTM", res.detail)
+            # No matches yet — don't fabricate a push. The retriever
+            # path (auto-pick top hit once matches arrive) handles the
+            # "transcript → shabad" transition now.
+            toast = _render_toast(
+                "Nothing to push yet — wait for a shabad match.", "warn",
+            )
+            return st, toast, _sttm_pill(st), _stat("STTM", "nothing")
 
         def on_pick_match(idx_str: str, st: StreamState):
             try:
@@ -2162,12 +2246,16 @@ def build_app(backend) -> gr.Blocks:
             if idx < 0 or idx >= len(st.matches):
                 return st, _render_toast("Match out of range.", "error"), _sttm_pill(st)
             _ensure_sttm(st)
-            if not (st.sttm_connected and st.sttm_port):
-                return (st, _render_toast(
-                    "STTM not reachable.", "error"), _sttm_pill(st))
-            res = push_hit(st.sttm_host, st.sttm_port, st.matches[idx],
-                           pin=st.sttm_pin or None)
-            return st, _render_toast(f"Pushed #{idx+1}: {res.detail}", "success"), _sttm_pill(st)
+            if not st.sttm_connected:
+                ctrl_msg = get_controller().last_error() or (
+                    "STTM not reachable — launch with "
+                    "--remote-debugging-port=9222."
+                )
+                return (st, _render_toast(ctrl_msg, "error"), _sttm_pill(st))
+            res = get_controller().push_hit(st.matches[idx])
+            kind = "success" if res.ok else "error"
+            prefix = f"Pushed #{idx+1}: " if res.ok else f"Push #{idx+1} failed: "
+            return st, _render_toast(f"{prefix}{res.detail}", kind), _sttm_pill(st)
 
         # ---------- manual shabad search ----------
 
@@ -2254,6 +2342,8 @@ def build_app(backend) -> gr.Blocks:
             st.matches = []
             st.last_search_key = ""
             st.last_fast_pointer_t = 0.0
+            st.pointer_candidate_row = None
+            st.pointer_candidate_hits = 0
             if st.retrieval_ema is not None:
                 st.retrieval_ema.reset()
             if auto_push:
@@ -2445,6 +2535,8 @@ def build_app(backend) -> gr.Blocks:
             st.matches = []
             st.last_search_key = ""
             st.last_fast_pointer_t = 0.0
+            st.pointer_candidate_row = None
+            st.pointer_candidate_hits = 0
             if st.retrieval_ema is not None:
                 st.retrieval_ema.reset()
 
@@ -2523,13 +2615,9 @@ def build_app(backend) -> gr.Blocks:
             on_undo, inputs=[state],
             outputs=[state, stage, primary_cta, matches_html, toast_mount, stats],
         )
-        connect_btn.click(on_connect, inputs=[sttm_host, sttm_port, sttm_pin, state],
+        connect_btn.click(on_connect, inputs=[sttm_pin, state],
                           outputs=[state, sttm_status, toast_mount])
-        sttm_host.change(on_connect, inputs=[sttm_host, sttm_port, sttm_pin, state],
-                         outputs=[state, sttm_status, toast_mount])
-        sttm_port.change(on_connect, inputs=[sttm_host, sttm_port, sttm_pin, state],
-                         outputs=[state, sttm_status, toast_mount])
-        sttm_pin.change(on_connect, inputs=[sttm_host, sttm_port, sttm_pin, state],
+        sttm_pin.change(on_connect, inputs=[sttm_pin, state],
                         outputs=[state, sttm_status, toast_mount])
         push_btn.click(on_push, inputs=[state],
                        outputs=[state, toast_mount, sttm_status, stats])
