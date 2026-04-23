@@ -67,16 +67,16 @@ POINTER_MOVE_FLOOR = float(os.environ.get("SURT_POINTER_MOVE", "0.15"))
 LITERAL_WEIGHT = float(os.environ.get("SURT_LITERAL_WEIGHT", "0.40"))
 
 # Retrieval modes — user-selectable in the UI.
-MODE_SEMANTIC_LITERAL = "semantic+literal"   # MuRIL + 2-layer FAISS + 4gram rerank
+MODE_SEMANTIC_LITERAL = "semantic+literal"   # MuRIL + 2-layer FAISS + 4gram rerank (default)
 MODE_SEMANTIC = "semantic"                    # MuRIL + 2-layer FAISS (no literal rerank)
-MODE_LITERAL = "literal"                      # char-4gram Jaccard over all tuks (no MuRIL, default)
+MODE_LITERAL = "literal"                      # char-4gram Jaccard over all tuks (no MuRIL)
 MODE_BANIDB = "banidb"                        # remote BaniDB API (online)
 DEFAULT_MODE = MODE_SEMANTIC_LITERAL
 
 MODE_LABELS: dict[str, str] = {
-    MODE_LITERAL:          "Literal only (char-4gram Jaccard; no MuRIL) — default",
-    MODE_SEMANTIC_LITERAL: "Semantic + literal (MuRIL + 4gram rerank)",
+    MODE_SEMANTIC_LITERAL: "Semantic + literal (MuRIL + 4gram rerank) — default",
     MODE_SEMANTIC:         "Semantic only (MuRIL; no literal bonus)",
+    MODE_LITERAL:          "Literal only (char-4gram Jaccard; no MuRIL)",
     MODE_BANIDB:           "BaniDB remote API (online only)",
 }
 
