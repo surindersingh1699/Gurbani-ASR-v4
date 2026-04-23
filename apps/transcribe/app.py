@@ -140,6 +140,14 @@ class StreamState:
     # Whisper hallucinates on very short buffers ("ਵਾਹਿਗੁਰੂ ਵਾਹਿਗੁਰੂ…" loops).
     # Require at least ~3 s of audio before we call the model on live mic.
     min_transcribe_s: float = 3.0
+    # Locked-mode fast-pointer cadence. Tighter than the unlocked path
+    # because matches are constrained to the locked shabad's ~30 tuks —
+    # hallucinations either fail to match (no advance) or trip the
+    # existing unlock floor in _check_unlock. Target: detect a new
+    # pangti within ~2 s of the ragi starting it.
+    fast_pointer_min_s: float = 1.2
+    fast_pointer_throttle_s: float = 0.6
+    last_fast_pointer_t: float = 0.0
     auto_push_threshold: float = AUTO_PUSH_THRESHOLD_DEFAULT
     hero_threshold: float = HERO_THRESHOLD_DEFAULT
 
@@ -1519,6 +1527,24 @@ def build_app(backend) -> gr.Blocks:
                 st.lock_streak_count = 1
             if st.lock_streak_count >= max(1, int(st.lock_streak_target)):
                 _lock(st, sid, tuk_row=top.get("_tuk_row"))
+
+        def _refresh_pointer(st: StreamState, tail_text: str) -> None:
+            """Advance the locked pointer using a fresh tail Whisper output.
+
+            Bypasses `_retrieval_query` (no 140-char tail trim — `tail_text`
+            already IS the query, transcribed from the last ~1.5 s of audio
+            with no carry-over). Skips unlock bookkeeping (the slower
+            commit pipeline owns that decision and runs against a longer,
+            cleaner buffer).
+
+            No-op if we're not locked or the tail is empty.
+            """
+            if not st.locked_shabad_id:
+                return
+            text = (tail_text or "").strip()
+            if not text:
+                return
+            _pointer_advance(st, text)
 
         def _refresh_matches(st: StreamState, *, smooth: bool = False) -> None:
             """Refresh matches.
