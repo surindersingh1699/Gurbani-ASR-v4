@@ -45,15 +45,19 @@ class RetrievalEMA:
                 self.scores.pop(sid, None)
                 self.last_hit.pop(sid, None)
 
-        # Fold in the new scores. If a shabad isn't in the new hits, it keeps
-        # decaying from the loop above.
+        # Fold in the new scores. First time we see a shabad, seed the EMA with
+        # the full new score rather than blending against 0 — otherwise the
+        # smoother needs ~3 windows (~30 s) to clear any auto-push threshold,
+        # which kills the live-mic/stream UX.
         for h in hits:
             sid = h.get("shabadId")
             if sid is None:
                 continue
             new_s = float(h.get("score", 0.0))
-            old_s = self.scores.get(sid, 0.0)
-            self.scores[sid] = (1.0 - self.alpha) * old_s + self.alpha * new_s
+            if sid in self.scores:
+                self.scores[sid] = (1.0 - self.alpha) * self.scores[sid] + self.alpha * new_s
+            else:
+                self.scores[sid] = new_s
             self.last_hit[sid] = h  # keep latest matched-tuk metadata
 
         # Rank and return top-N. Clamp the smoothed score to [0, 1] so the UI

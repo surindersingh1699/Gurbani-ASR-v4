@@ -1,0 +1,123 @@
+# IndicConformer-pa-large fine-tune on v3 600h Gurbani corpus
+# Target hardware: 1× A40 48GB (RunPod spot ~$0.39-0.79/hr)
+# Base checkpoint: ai4bharat/indicconformer_stt_pa_hybrid_ctc_rnnt_large (.nemo file)
+# Goal: beat surt-small-v3 baseline kirtan WER (57.28%) by ≥5pp.
+
+name: "indicconformer-pa-v3-kirtan"
+
+init_from_nemo_model: /workspace/data/indicconformer_stt_pa_hybrid_rnnt_large.nemo
+
+model:
+  sample_rate: 16000
+  log_prediction: false      # don't spam logs with every batch's hypothesis
+  ctc_reduction: 'mean_volume'
+  use_cer: true               # CER is the more reliable metric for Gurmukhi
+
+  # Hybrid CTC-RNNT joint loss — keep AI4Bharat's default ratio.
+  aux_ctc:
+    ctc_loss_weight: 0.3      # 0.3 CTC + 0.7 RNNT = AI4Bharat default
+    use_cer: true
+    decoding:
+      strategy: "greedy"
+
+  # KEEP existing multilingual aggregate tokenizer from the .nemo file —
+  # do NOT replace. Punjabi sub-tokenizer (256 BPE pieces) is what we want.
+  tokenizer:
+    update_tokenizer: false
+
+  # ---- training data ----
+  train_ds:
+    manifest_filepath: /workspace/data/manifests/train.jsonl  # built by scripts/build_train_manifest.py
+    sample_rate: 16000
+    batch_size: 64                # MICRO batch per GPU step
+    shuffle: true
+    num_workers: 8                # A40 host typically has 16 vCPU; 8 audio workers leaves headroom
+    pin_memory: true
+    use_start_end_token: false
+    trim_silence: false           # we keep silent tails — model needs to learn "no speech → blank"
+    max_duration: 22.0            # hard cap; v3 corpus uses 20s clips
+    min_duration: 0.5
+    bucketing_strategy: "fully_randomized"
+    bucketing_batch_size: null
+    is_tarred: false              # if you tar the data later, flip this + use the LhotseDataModule path
+
+  validation_ds:
+    manifest_filepath: /workspace/data/manifests/val_kirtan.jsonl
+    sample_rate: 16000
+    batch_size: 32                # smaller — eval doesn't need grad-accum, just clear memory
+    shuffle: false
+    num_workers: 4
+
+  test_ds:
+    manifest_filepath: /workspace/data/manifests/val_sehajpath.jsonl
+    sample_rate: 16000
+    batch_size: 32
+    shuffle: false
+    num_workers: 4
+
+  # ---- SpecAugment — kept moderate; aggressive masking hurts simran ----
+  spec_augment:
+    _target_: nemo.collections.asr.modules.SpectrogramAugmentation
+    freq_masks: 2
+    time_masks: 5            # NeMo default 10 — halved because simran has long token-repeat patterns we don't want randomly cut
+    freq_width: 27
+    time_width: 0.05         # fraction of seq length
+
+  # ---- optimizer ----
+  optim:
+    name: adamw
+    lr: 1.0e-4               # peak LR; AI4Bharat trained at 5e-4 from scratch — for fine-tune we want 5-10× lower
+    betas: [0.9, 0.98]
+    weight_decay: 1.0e-3
+    sched:
+      name: CosineAnnealing
+      warmup_steps: 2000
+      min_lr: 1.0e-6
+
+trainer:
+  devices: 1
+  accelerator: gpu
+  num_nodes: 1
+  max_epochs: 8                  # 600h corpus / 256 effective batch / ~20s/clip ≈ ~430 steps/epoch · 8 epochs = ~3.5k steps
+                                 # we use max_steps below as the real cap; epochs is just a fallback
+  max_steps: 35000               # ≈ 7-8 epochs over 600h post-leak-removal
+  accumulate_grad_batches: 4     # effective batch = 64 micro × 4 accum = 256
+  gradient_clip_val: 1.0
+  precision: bf16-mixed          # A40 supports bf16 natively, no scaler needed
+  log_every_n_steps: 50
+  val_check_interval: 2000       # eval every 2000 steps on KIRTAN val set
+  check_val_every_n_epoch: null
+  num_sanity_val_steps: 2
+  sync_batchnorm: false
+  enable_checkpointing: false    # we use NeMo's exp_manager for checkpoints
+  benchmark: true                # cudnn benchmark — speed up fixed-shape ops
+
+exp_manager:
+  exp_dir: /workspace/checkpoints/indicconformer-pa-v3-kirtan
+  name: indicconformer-pa-v3-kirtan
+  create_tensorboard_logger: true
+  create_wandb_logger: true
+  wandb_logger_kwargs:
+    project: surt-indicconformer
+    name: indicconformer-pa-v3-kirtan
+    entity: sabysurinder-surinder        # matches WANDB_ENTITY in project memory
+  resume_if_exists: true
+  resume_ignore_no_checkpoint: true
+
+  # ---- early stop on KIRTAN WER (not loss) — that's what we actually care about ----
+  create_early_stopping_callback: true
+  early_stopping_callback_params:
+    monitor: "val_wer"           # NeMo logs val_wer for the first val dataloader (kirtan)
+    mode: "min"
+    min_delta: 0.005             # 0.5pp WER improvement to count as progress
+    patience: 4                  # 4 evals × 2000 steps = 8000 steps with no improvement → stop
+    verbose: true
+
+  # ---- save best 3 by kirtan WER + last ----
+  checkpoint_callback_params:
+    monitor: "val_wer"
+    mode: "min"
+    save_top_k: 3
+    save_last: true
+    always_save_nemo: true       # also write .nemo file (easier deploy)
+    filename: "{epoch}-step{step}-kirtan_wer{val_wer:.4f}"

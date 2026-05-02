@@ -38,7 +38,7 @@ def main():
     results = pipeline.run(rows)
     hist = Counter(r["decision"] for r in results)
     print(f"\nDecision histogram:")
-    for dec in ["matched", "replaced", "review", "unchanged", "simran"]:
+    for dec in ["exact", "matched", "replaced", "review", "unchanged", "simran"]:
         n = hist.get(dec, 0)
         pct = 100 * n / len(results) if results else 0
         print(f"  {dec:10} {n:5d}  ({pct:5.1f}%)")

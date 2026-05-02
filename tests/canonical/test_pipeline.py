@@ -21,14 +21,16 @@ def sehaj_pipeline():
 
 class TestKirtanPipeline:
     def test_matched_clean_kirtan_row(self, kirtan_pipeline):
-        # Clean SGGS line from EZ7 (in monotonic order matching scripture)
+        # Clean SGGS line from EZ7 (in monotonic order matching scripture).
+        # After the exact-match short-circuit landed, byte-identical lines get
+        # labeled 'exact' (stronger signal) rather than going through NW.
         rows = [{
             "clip_id": "r1", "video_id": "v1",
             "text": "ਸੁਖ ਸਾਗਰ ਮੇਰੇ ਗੁਰ ਗੋਪਾਲਾ",
             "duration_s": 4.0,
         }]
         out = kirtan_pipeline.run(rows)
-        assert out[0]["decision"] in ("matched", "replaced")
+        assert out[0]["decision"] in ("exact", "matched", "replaced")
         assert out[0]["shabad_id"] == "EZ7"
 
     def test_replaced_with_matra_fix(self, kirtan_pipeline):
@@ -40,6 +42,27 @@ class TestKirtanPipeline:
         out = kirtan_pipeline.run(rows)
         assert out[0]["decision"] == "replaced"
         assert "ਸਰਣਿ" in out[0]["final_text"]
+
+    def test_exact_byte_match_short_circuit(self, kirtan_pipeline):
+        # Pick an SGGS line text from the pipeline's own line index so we know
+        # it exists and is byte-identical. Then feed it as caption and expect
+        # decision='exact' + match_score=1.0.
+        # Grab the first line with >= 3 tokens (avoid trivial 1-2 token lines
+        # that would collide with many other rows anyway).
+        sample = next(
+            ln for ln in kirtan_pipeline.lines
+            if len(ln.tokens) >= 3 and ln.shabad_id
+        )
+        rows = [{
+            "clip_id": "r1", "video_id": "v1",
+            "text": sample.unicode,
+            "duration_s": 4.0,
+        }]
+        out = kirtan_pipeline.run(rows)
+        assert out[0]["decision"] == "exact"
+        assert out[0]["match_score"] == 1.0
+        assert out[0]["final_text"] == sample.unicode
+        assert out[0]["shabad_id"] == sample.shabad_id
 
     def test_simran_short_circuit(self, kirtan_pipeline):
         rows = [{

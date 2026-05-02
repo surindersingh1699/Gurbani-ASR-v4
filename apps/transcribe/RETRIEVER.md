@@ -105,3 +105,66 @@ candidates = set(I[0].tolist()) | set(lit_rows)         # fusion
 If the fusion fix proves out, consider whether `tracker.py` has the same
 candidate-pool blind spot — it uses the same MuRIL embedding space so the
 chant-cluster pathology is likely the same.
+
+---
+
+## Lock / pointer model (2026-04-21)
+
+Two distinct score floors govern the locked state. Keeping them decoupled is
+the whole reason the pointer can follow the ragi on noisy ASR.
+
+| Constant | Default | Env var | Role |
+| --- | --- | --- | --- |
+| `LOCK_SCORE_FLOOR` | 0.80 | `SURT_LOCK_SCORE` | Literal overlap a top hit must hit (UNLOCKED) before it becomes lock-eligible. |
+| `UNLOCK_SCORE_FLOOR` | 0.50 | `SURT_UNLOCK_FLOOR` | Within-shabad overlap below which a window is a "miss". N misses in a row → unlock. |
+| `POINTER_MOVE_FLOOR` | 0.15 | `SURT_POINTER_MOVE` | Within-shabad overlap required to *move the pointer* to the best-matching pangti. Weaker than UNLOCK_SCORE_FLOOR on purpose. |
+
+Why three floors: UNLOCKED needs a strong literal signal to trust a shabad
+pick out of ~15 k. LOCKED needs only a weak signal to move the pointer —
+we already committed to the shabad, so within it, even partial/garbled ASR
+is enough to identify the current pangti.
+
+### Per-path behavior (all three share the same `_refresh_matches` / `_handle_locked`)
+
+| Input path | Query source when locked | Update cadence | Pointer-advance benefit |
+| --- | --- | --- | --- |
+| **Live mic** (`on_stream`) | `st.tentative or st.committed` | Every throttle tick (~1.2 s) | Biggest — pointer advances between commits, not only every ~10 s. |
+| **Play from URL / loaded file** (`_on_stream_url`) | `st.committed` (no tentative in this path) | Every playhead-sized window (~10 s) | Medium — windows with weak/noisy ASR now advance instead of being misses. |
+| **Upload file** (`on_upload`) | One-shot; whole audio transcribed once | Single call, no pointer to advance over time | None. If you want per-line advancement on a file, load it in the **Play from file / URL** tab instead. |
+
+### Query source differs by state
+
+- **LOCKED:** prefer `st.tentative` (freshest ASR of the current pangti) over
+  `st.committed`. Fall back to committed only when tentative is empty (e.g.
+  URL/playback path, which never sets tentative).
+- **UNLOCKED:** prefer `st.committed` (longer, cleaner tail) — picking the
+  right shabad from 15 k needs more context than identifying a pangti inside
+  one locked shabad.
+
+### Relationship to the UI
+
+- `_handle_locked` sets `st.locked_tuk_row` and rewrites `st.matches` to a
+  single locked hit with `highlight_idx` pointing at the current pangti.
+- The stage hero renders the full shabad with the highlighted line.
+- Unlock decision is counted **independently** of pointer advance — a
+  window can move the pointer (overlap ≥ 0.15) and still count as a miss
+  toward unlock (overlap < 0.50). That's intentional: follow the ragi on
+  partial signal, but still release the lock if signal stays weak for
+  `unlock_misses_target` windows (default 3).
+
+### Tuning knobs
+
+- Pointer chatters on noise → raise `SURT_POINTER_MOVE` (e.g. 0.25).
+- Pointer lags on clean audio → raise `SURT_POINTER_MOVE` is the wrong fix;
+  usually means hero isn't rendering. Check that `st.locked_shabad_id` is
+  set and that `hero_mode` short-circuits on lock (see below).
+- Unlocks too eagerly → raise `SURT_UNLOCK_FLOOR` or `unlock_misses_target`.
+
+### Gotcha: hero card must unconditionally render while locked
+
+Pointer-advance writes `ui_score = 0.5 + 0.5 * overlap`. On weak signal
+(overlap 0.15–0.40) that lands below the default `hero_threshold = 0.70`,
+so the stage falls back to "transcript-only" — user sees committed text
+but no highlighted shabad, and reports "pointer isn't moving" even though
+`st.locked_tuk_row` is updating correctly. Fix: gate `hero_mode` on
+`st.locked_shabad_id is not None` in addition to the score threshold.

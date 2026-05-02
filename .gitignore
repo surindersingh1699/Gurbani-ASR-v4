@@ -54,3 +54,12 @@ logs/
 canonical_audit.parquet
 canonical_llm.parquet
 review_decisions.csv
+
+# Local tool/agent state
+.claude/
+.gradio/
+
+# Local databases
+*.sqlite
+*.sqlite3
+*.db

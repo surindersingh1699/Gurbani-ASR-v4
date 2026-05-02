@@ -21,7 +21,7 @@ from .waheguru import WAHEGURU_SKEL
 class SimranConfig:
     min_reps: int = 5
     ratio_threshold: float = 0.70
-    target_count: int = 750
+    target_count: int = 800
     per_video_min: int = 1
     per_video_max: int = 10
 

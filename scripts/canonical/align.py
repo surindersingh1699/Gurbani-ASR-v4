@@ -31,11 +31,18 @@ class AlignConfig:
 
 
 def _fix_eligible(
-    cap_skel: str, sgs_skel: str, cfg: AlignConfig, max_edit: int
+    cap_skel: str,
+    sgs_skel: str,
+    cfg: AlignConfig,
+    max_edit: int,
+    equal_length: bool = False,
 ) -> bool:
     if len(cap_skel) < cfg.min_cons_len or len(sgs_skel) < cfg.min_cons_len:
         return False
-    if abs(len(cap_skel) - len(sgs_skel)) > max_edit:
+    if equal_length:
+        if len(cap_skel) != len(sgs_skel):
+            return False
+    elif abs(len(cap_skel) - len(sgs_skel)) > max_edit:
         return False
     return lev(cap_skel, sgs_skel) <= max_edit
 
@@ -47,7 +54,10 @@ def _score_11(
         return cfg.score_match, "match"
     if cs == ss and cs and len(cs) >= cfg.min_cons_len:
         return cfg.score_fix_matra, "fix"
-    if _fix_eligible(cs, ss, cfg, max_edit):
+    # 1-consonant swap: skeletons must be the same length. Different-length
+    # substitutions (lev==1 via insert/delete) drive hallucinations like
+    # ਹਰਿ→ਕਰੇ. Merge/split still allow length delta via their own branches.
+    if _fix_eligible(cs, ss, cfg, max_edit, equal_length=True):
         return cfg.score_fix_1cons, "fix"
     return cfg.floor, None
 

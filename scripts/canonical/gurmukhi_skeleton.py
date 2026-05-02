@@ -8,7 +8,15 @@ from __future__ import annotations
 import re
 
 _SKELETON_STRIP = re.compile(
-    r"[\u0A3C\u0A3E-\u0A4D\u0A51\u0A70\u0A71\u0A75"
+    # Matras + combining marks that should be ignored for skeleton:
+    #   \u0A01 adak bindi, \u0A02 bindi, \u0A03 visarga — nasalization /
+    #     aspiration marks above the letter, matra-level.
+    #   \u0A3C nukta, \u0A3E-\u0A4D standard matras + halant,
+    #   \u0A51 udaat, \u0A70 tippi, \u0A71 addak, \u0A75 yakash.
+    # Bindi (U+0A02) had been missing before 2026-04-19 — its absence
+    # made `ਇਛਾ → ਇਛਾਂ` fail V5 diff-length even though the change is
+    # structurally matra-only.
+    r"[\u0A01-\u0A03\u0A3C\u0A3E-\u0A4D\u0A51\u0A70\u0A71\u0A75"
     r"\u0A66-\u0A6F"
     r"0-9\s\u200C\u200D।॥॰.,;:!?'\"()\[\]<>]+"
 )

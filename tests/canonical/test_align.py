@@ -74,6 +74,34 @@ class TestMinConsLen:
         assert "delete" in types
 
 
+class TestEqualLengthFixEligibility:
+    def test_reject_different_length_1_cons_swap(self):
+        # ਹਰਿ (skel=ਹਰ, len=2) vs ਕਰੇ (skel=ਕਰ, len=2) — same length, lev=1,
+        # accepted. But in the wild we saw ਹਰਿ→ਕਰੇ style bad rewrites where
+        # only one of the two consonants matched. Construct a mismatched case:
+        # caption ਤੂੰ (skel=ਤ, len=1) aligned against shabad ਤਿਨੑੀ
+        # (skel=ਤਨ, len=2). Under old rules abs(1-2)=1 <= max_edit=1 and
+        # lev(ਤ,ਤਨ)=1 — would pass. With equal_length=True this is rejected.
+        shabad = [_mk("L1", ("ਤਿਨੑੀ", "ਧੁਰਿ"))]
+        ops = align_nw(["ਤੂੰ", "ਧੁਰਿ"], shabad, AlignConfig())
+        # ਤੂੰ must not be replaced with ਤਿਨੑੀ. Expect delete (or at worst
+        # merge/split via a different branch), but NOT a 1-cons 'fix' swap.
+        first_op = ops[0]
+        if first_op["op"] == "fix":
+            assert first_op["sggs"] != ["ਤਿਨੑੀ"], (
+                "1-cons swap across different lengths should be rejected"
+            )
+
+    def test_equal_length_1_cons_fix_still_works(self):
+        # Regression: legitimate same-length 1-cons swap should still pass.
+        # ਉਦਾੜੀ (skel=ਦੜ, len=2) vs ਉਜਾੜੀ (skel=ਜੜ, len=2) — same length,
+        # lev=1. Must still produce a 'fix'.
+        shabad = [_mk("L1", ("ਉਜਾੜੀ",))]
+        ops = align_nw(["ਉਦਾੜੀ"], shabad, AlignConfig())
+        assert ops[0]["op"] == "fix"
+        assert ops[0]["sggs"] == ["ਉਜਾੜੀ"]
+
+
 class TestOrphanRealign:
     def test_orphan_realign_runs_without_error(self):
         shabad = [_mk("L1", ("ਤੇਰੀ", "ਸਰਣਿ", "ਮੇਰੇ", "ਦੀਨ", "ਦਇਆਲਾ"))]

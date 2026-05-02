@@ -1,0 +1,52 @@
+# Surt data allowlist — single source of truth for training data provenance.
+#
+# Two sections:
+#   (1) v3 IN SCOPE  — pulled now for the 500h retrain (SikhNet / akj.org / sgpc.net).
+#   (2) v2 / FUTURE  — YouTube + other sources. NOT pulled by v3 pipeline.
+#                      Scripts MUST ignore lines below the "=== v2 ===" marker.
+#                      Promotes to v3 only by editing this file + explicit commit.
+#
+# Rules (from PLAN.md, do not relax):
+#   - v3 scripts read ONLY section (1), up to the "=== v2 ===" marker.
+#   - Adding a new source = edit this file in its own commit so intent is auditable.
+#   - Do NOT silently add hidden sources inside enumeration scripts.
+
+
+# =============================================================================
+# (1) v3 IN SCOPE — ACTIVE ALLOWLIST
+# =============================================================================
+
+# =============================================================================
+# === v2 === (FUTURE DATA COLLECTION — NOT PULLED BY v3 PIPELINE)
+# =============================================================================
+# Scripts MUST treat any URL below this marker as out of scope for v3.
+# These are YouTube-based sources queued for v2/v4 data collection after
+# v3 training completes and we have a measured WER baseline. Reason YT
+# was deferred: copyright, geo-block, dedup headaches, rate-limits.
+#
+# When promoting a v2 source to v3 scope: move the line above the
+# "=== v2 ===" marker in its own commit and update PLAN.md targets.
+
+# v2-ragi — YouTube studio/official channels (clean, well-labeled captions exist)
+https://www.youtube.com/@sikhnet
+https://www.youtube.com/@amrittsaagar
+https://www.youtube.com/@GurbaniMediaCentre
+https://www.youtube.com/@NirbaanKeertan
+https://www.youtube.com/@GurbaniNow
+
+# v2-akj — YouTube AKJ smagams (longer, congregational, sangat vocals)
+https://www.youtube.com/@akjdotorg
+
+# v2-sgpc — YouTube live darbar sahib + SGPC official streams
+
+v2 - dasam bani
+
+
+
+# v2-nitnem — YouTube nitnem / rehras / ardas / hukamnama recitations
+# (new stratum — add panj-pyaras authoritative recitations here before promotion)
+# TODO: find official SGPC / DSGMC nitnem channels and list them
+
+# v2-real-noise — phone recordings, family gatherings, household kirtan
+# (for Stage D production-distribution fine-tune; NOT for Stage A/B/C)
+# TODO: curate ~50h of real-world recordings with human-verified labels

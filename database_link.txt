@@ -1,0 +1,14 @@
+eval/test only-- do not train, just for eval and test
+https://huggingface.co/datasets/surindersinghssj/gurbani-kirtan-eval-pure-canonical
+https://huggingface.co/da finatasets/surindersinghssj/gurbani-sehajpath-yt-captions-eval-canonical
+
+
+450h kirtan --
+https://huggingface.co/datasets/surindersinghssj/gurbani-kirtan-yt-captions-300h-canonical
+
+2 sehaj path --
+https://huggingface.co/datasets/surindersinghssj/gurbani-sehajpath-yt-captions-canonical
+
+1 older sehaj path--
+https://huggingface.co/datasets/surindersinghssj/gurbani-sehajpath
+

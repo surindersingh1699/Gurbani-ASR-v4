@@ -63,10 +63,24 @@ class CanonicalPipeline:
             next_shabad_in_sequence(self.lines)
             if cfg.sequential_shabad_retrieval else None
         )
+        # Exact-match index: caption token-joined text → (line_id, shabad_id).
+        # Used to short-circuit retrieval + alignment when the caption is
+        # byte-identical to a canonical SGGS line. First occurrence wins on
+        # collisions (duplicate lines across shabads are rare).
+        self.line_text_to_id: dict[str, tuple[str, str]] = {}
+        for ln in self.lines:
+            if ln.unicode and ln.unicode not in self.line_text_to_id:
+                self.line_text_to_id[ln.unicode] = (ln.line_id, ln.shabad_id)
 
-    def run(self, rows: list[dict]) -> list[dict]:
+    def run(self, rows: list[dict], defer_simran_quota: bool = False) -> list[dict]:
         """Process a list of HF-dataset rows. Returns list of dicts with
-        all original fields + the new canonical columns."""
+        all original fields + the new canonical columns.
+
+        If `defer_simran_quota=True`, simran detection still runs (so the
+        per-row short-circuit fires) but the global cap is NOT applied here.
+        Caller is expected to call apply_simran_quota_to_results() across
+        the combined results from all workers.
+        """
         # Phase -1: drop dead rows
         kept = [r for r in rows if not should_drop_row(r, self.preclean_cfg)]
 
@@ -83,7 +97,8 @@ class CanonicalPipeline:
             for r in kept:
                 toks = tokenize(r["_clean_text"])
                 r["is_simran"] = is_simran(toks, self.simran_cfg)
-            kept = apply_simran_quota(kept, self.simran_cfg)
+            if not defer_simran_quota:
+                kept = apply_simran_quota(kept, self.simran_cfg)
         else:
             for r in kept:
                 r["is_simran"] = False
@@ -94,7 +109,7 @@ class CanonicalPipeline:
         for i, r in enumerate(kept):
             video_hits = by_video_hits.setdefault(r["video_id"], Counter())
             result = self._process_row(r, i, kept, video_hits)
-            if result["decision"] in ("matched", "replaced", "review"):
+            if result["decision"] in ("exact", "matched", "replaced", "review"):
                 video_hits[result["shabad_id"]] += 1
             out.append(result)
         return out
@@ -148,8 +163,8 @@ class CanonicalPipeline:
         if len(per_part_results) == 1:
             pr = per_part_results[0]
         else:
-            # Concatenate. Decision = worst of sub-parts (unchanged > review > replaced > matched)
-            order = {"matched": 0, "replaced": 1, "review": 2, "unchanged": 3, "simran": 4}
+            # Concatenate. Decision = worst of sub-parts (unchanged > review > replaced > matched > exact)
+            order = {"exact": 0, "matched": 1, "replaced": 2, "review": 3, "unchanged": 4, "simran": 5}
             combined_text = " ".join(p["final_text"] for p in per_part_results)
             combined_sggs = " ".join(
                 p["sggs_line"] for p in per_part_results if p.get("sggs_line")
@@ -183,6 +198,27 @@ class CanonicalPipeline:
         }
 
     def _align_one(self, cap_tokens, i, rows, video_hits) -> dict:
+        # Exact-match short-circuit. If the caption (post waheguru-norm +
+        # tokenize) is byte-identical to an SGGS line, skip retrieval +
+        # alignment entirely. Label = 'exact', score = 1.0.
+        cap_joined = " ".join(cap_tokens)
+        hit = self.line_text_to_id.get(cap_joined)
+        if hit is not None:
+            line_id, shabad_id = hit
+            return {
+                "sggs_line": cap_joined,
+                "final_text": cap_joined,
+                "decision": "exact",
+                "shabad_id": shabad_id,
+                "line_ids": [line_id],
+                "match_score": 1.0,
+                "op_counts": {
+                    "match": len(cap_tokens), "fix": 0, "merge": 0,
+                    "split": 0, "delete": 0,
+                },
+                "retrieval_margin": None,
+            }
+
         pn, pn2 = self._neighbors(rows, i)
         sid, score, margin, _ = retrieve_shabad(
             cap_tokens, pn, pn2,
