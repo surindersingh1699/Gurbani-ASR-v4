@@ -194,6 +194,12 @@ class StreamState:
     # Kirtan player
     player_audio: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=np.float32))
     player_path: str = ""
+    # Audience-facing playhead (audio seconds the user has heard up to). Used by
+    # the play-sync paths and the bench harness to stamp [sttm] pushed events at
+    # the audio offset where the audience would actually see the projected line.
+    # Default 0.0 for live mic / one-shot paths that don't have a meaningful
+    # playhead — those callers don't read this in production.
+    audio_played_s: float = 0.0
 
     # Undo
     undo_committed: str | None = None
@@ -1715,6 +1721,7 @@ def build_app(backend) -> gr.Blocks:
             print(f"[lock] lock · sid={sid} · tuk_row={tuk_row}")
 
         def _unlock(st: StreamState) -> None:
+            prev_sid = st.locked_shabad_id
             st.locked_shabad_id = None
             st.locked_tuk_row = None
             st.pointer_candidate_row = None
@@ -1726,6 +1733,7 @@ def build_app(backend) -> gr.Blocks:
             st.last_pushed_key = None  # allow re-push if ragi returns to same shabad
             if st.retrieval_ema is not None:
                 st.retrieval_ema.reset()
+            print(f"[lock] unlock · prev_sid={prev_sid}")
 
         def _maybe_auto_lock(st: StreamState, hits: list[dict]) -> None:
             """Promote UNLOCKED → LOCKED when the top match is confident enough
@@ -1769,7 +1777,13 @@ def build_app(backend) -> gr.Blocks:
             text = (tail_text or "").strip()
             if not text:
                 return
+            prev_row = st.locked_tuk_row
             _pointer_advance(st, text)
+            if st.locked_tuk_row != prev_row:
+                print(
+                    f"[pointer] sid={st.locked_shabad_id} "
+                    f"row {prev_row}→{st.locked_tuk_row}"
+                )
 
         def _fast_pointer_scan_played(
             st: StreamState, audio_buf: np.ndarray, played_s: float,
@@ -2244,7 +2258,20 @@ def build_app(backend) -> gr.Blocks:
             res = get_controller().push_hit(top)
             if res.ok:
                 st.last_pushed_key = key
-                print(f"[sttm] pushed sid={sid} verseId={vid} · score={top.get('score')}")
+                # `audio_t`, `line_idx`, and `banidb_gurmukhi` are bench-critical:
+                # they let an off-line scorer reconstruct exactly what the
+                # audience saw on STTM at any audio offset, and join the pushed
+                # pangti to canonical BaniDB verseId via gurmukhi text equality
+                # (no fragile rowid joins). Production users see this in stdout
+                # too — harmless extra context, no UX impact.
+                line_idx = top.get("highlight_idx", -1)
+                banidb_gurmukhi = (top.get("gurmukhi") or "").replace("\n", " ")
+                print(
+                    f"[sttm] pushed audio_t={st.audio_played_s:.2f} "
+                    f"sid={sid} verseId={vid} line_idx={line_idx} "
+                    f"score={top.get('score')} "
+                    f"banidb_gurmukhi={banidb_gurmukhi!r}"
+                )
             else:
                 print(f"[sttm] push failed: {res.detail}")
 
@@ -2449,6 +2476,7 @@ def build_app(backend) -> gr.Blocks:
                     0.0,
                     min(buf.size / TARGET_SR, time.time() - t_start - PLAYHEAD_LAG_S),
                 )
+                st.audio_played_s = playhead_s
                 while (
                     buf.size - transcribed_up_to >= window_samples
                     and (transcribed_up_to + window_samples) / TARGET_SR
@@ -2494,6 +2522,7 @@ def build_app(backend) -> gr.Blocks:
                     0.0,
                     min(buf.size / TARGET_SR, time.time() - t_start - PLAYHEAD_LAG_S),
                 )
+                st.audio_played_s = playhead_s
                 fast_ran = _fast_pointer_scan_played(st, buf, playhead_s)
                 if auto_push and fast_ran:
                     _try_auto_push(st)
@@ -2579,6 +2608,7 @@ def build_app(backend) -> gr.Blocks:
 
             while True:
                 played_s = min(total_s, max(0.0, time.time() - t_start))
+                st.audio_played_s = played_s
                 played_samples = min(total, int(played_s * sr))
 
                 while transcribed_up_to + window_samples <= played_samples:
@@ -2632,6 +2662,112 @@ def build_app(backend) -> gr.Blocks:
                    _render_matches(st.matches),
                    _stat("player", "sync finished"), _sttm_pill(st),
                    gr.update())
+
+        def _run_bench_file(audio_path: str) -> None:
+            """Headless cousin of `on_play_sync`'s file branch.
+
+            Runs the **same** algorithm — `_transcribe`, `_merge_committed`,
+            `_refresh_matches`, `_fast_pointer_scan_played`, `_try_auto_push` —
+            against an on-disk wav, but replaces the wall-clock playhead
+            (`time.time() - t_start`) with a frame-counter advanced in
+            `fast_pointer_throttle_s`-sized ticks. Same commit cadence, same
+            fast-pointer cadence, no real-time waiting.
+
+            Not a UX path: meant for offline benchmarking. Capture happens via
+            stdout `[sttm] pushed audio_t=… sid=… verseId=… line_idx=…` lines —
+            `main()` monkey-patches the controller to a recording stub when
+            `--bench-wav` is passed so `_try_auto_push`'s dedup behaves
+            identically to production.
+            """
+            from apps.transcribe.player import load_audio_16k
+
+            audio, _sr_in = load_audio_16k(audio_path)
+            if audio.size == 0:
+                raise RuntimeError(f"empty audio: {audio_path}")
+
+            st = StreamState()
+            st.player_audio = audio
+            st.player_path = str(audio_path)
+            # Mirror on_play_sync init verbatim.
+            st.committed = ""
+            st.tentative = ""
+            st.matches = []
+            st.last_search_key = ""
+            st.last_fast_pointer_t = 0.0
+            st.pointer_candidate_row = None
+            st.pointer_candidate_hits = 0
+            if st.retrieval_ema is not None:
+                st.retrieval_ema.reset()
+            _ensure_sttm(st)  # records connected via the bench stub
+
+            sr = TARGET_SR
+            total = audio.size
+            total_s = total / sr
+            window_samples = int(10.0 * sr)
+            carry_samples = int(st.carry_over_s * sr)
+            transcribed_up_to = 0
+            # One tick per production fast-pointer cadence so audio_played_s
+            # advances at the same granularity the live UX would have.
+            tick_s = float(st.fast_pointer_throttle_s)
+            played_s = 0.0
+            t0_wall = time.time()
+
+            print(
+                f"[bench] start · path={audio_path} · audio={total_s:.1f}s · "
+                f"tick={tick_s:.2f}s window=10.0s carry={st.carry_over_s:.1f}s"
+            )
+
+            while played_s < total_s:
+                played_s = min(total_s, played_s + tick_s)
+                st.audio_played_s = played_s
+                played_samples = min(total, int(played_s * sr))
+
+                # Commit any windows whose end-time is now "played" — same gate
+                # as on_play_sync's inner while loop.
+                while transcribed_up_to + window_samples <= played_samples:
+                    s0 = transcribed_up_to
+                    s1 = s0 + window_samples
+                    chunk = audio[s0:s1]
+                    if st.gain_normalize:
+                        chunk = _normalize_gain(
+                            chunk, target_rms=st.gain_target_rms,
+                        )
+                    text = _transcribe(st, chunk)
+                    if text:
+                        st.committed = _merge_committed(st.committed, text)
+                        _refresh_matches(st, smooth=True)
+                        _try_auto_push(st)
+                    transcribed_up_to = s1 - carry_samples
+
+                # One fast-pointer attempt per tick. Bypass the wall-clock
+                # throttle (`fast_pointer_throttle_s`) — it gates production at
+                # the same audio cadence we're already advancing in, so the
+                # throttle would just suppress every-other call here.
+                st.last_fast_pointer_t = 0.0
+                fast_ran = _fast_pointer_scan_played(st, audio, played_s)
+                if fast_ran:
+                    _try_auto_push(st)
+
+            # Tail drain — verbatim from on_play_sync.
+            if total - transcribed_up_to >= int(st.min_transcribe_s * sr):
+                st.audio_played_s = total_s
+                tail = audio[transcribed_up_to:]
+                if st.gain_normalize:
+                    tail = _normalize_gain(
+                        tail, target_rms=st.gain_target_rms,
+                    )
+                text = _transcribe(st, tail)
+                if text:
+                    st.committed = _merge_committed(st.committed, text)
+                    _refresh_matches(st, smooth=True)
+                    _try_auto_push(st)
+
+            wall_dt = time.time() - t0_wall
+            speedup = total_s / max(wall_dt, 1e-3)
+            print(
+                f"[bench] done · audio={total_s:.1f}s wall={wall_dt:.1f}s "
+                f"speedup={speedup:.2f}x"
+            )
 
         # ---------- wiring ----------
 
@@ -2736,10 +2872,27 @@ def build_app(backend) -> gr.Blocks:
             outputs=[state],
         )
 
+    # Expose the bench entry point for headless evaluation. main() picks this
+    # up when --bench-wav is set; UI users never touch it.
+    demo._surt_run_bench_file = _run_bench_file  # type: ignore[attr-defined]
     return demo
 
 
 def main() -> None:
+    # `--bench-wav` runs the headless bench harness against a single 16 kHz wav
+    # and exits before launching the UI. Used to score this app's exact stack
+    # (faster-whisper INT8 + retriever + lock state + auto-push) on offline
+    # eval sets. Capture is via stdout `[sttm] pushed …` lines (see
+    # `_try_auto_push` in build_app() and the recording stub installed below).
+    import argparse
+
+    parser = argparse.ArgumentParser(prog="apps.transcribe.app")
+    parser.add_argument(
+        "--bench-wav",
+        help="Run headless bench on this 16 kHz wav and exit (skips UI launch).",
+    )
+    args, _unknown = parser.parse_known_args()
+
     backend = load_backend()
     # Pre-warm the local retriever so the first live-mic window isn't a 5-10 s
     # MuRIL load. Blocks startup by the same amount, but predictable.
@@ -2747,6 +2900,43 @@ def main() -> None:
         get_retriever()
     except Exception as e:  # noqa: BLE001
         print(f"[surt] retriever pre-warm failed: {e}")
+
+    if args.bench_wav:
+        # Replace the CDP STTM controller with a no-op recorder. `_try_auto_push`
+        # only reads `is_connected()` and the bool result of `push_hit()`; this
+        # stub satisfies both contracts so dedup behavior (last_pushed_key)
+        # stays identical to production. Actual capture is via stdout — see
+        # the `[sttm] pushed` print in `_try_auto_push`.
+        from apps.transcribe import sttm_controller as _sttm
+
+        class _BenchSTTMController:
+            def is_connected(self) -> bool:
+                return True
+
+            def connect(self, cdp_port=None) -> bool:  # noqa: ARG002
+                return True
+
+            def push_hit(self, hit: dict):
+                sid = hit.get("shabadId")
+                vid = hit.get("verseId") or sid
+                return _sttm.STTMStatus(
+                    True, "bench", None,
+                    f"recorded sid={sid} verseId={vid}",
+                )
+
+            def last_error(self):
+                return None
+
+        _sttm._controller = _BenchSTTMController()  # type: ignore[assignment]
+        _sttm.get_controller = lambda *_a, **_kw: _sttm._controller  # type: ignore[assignment]
+
+        demo = build_app(backend)
+        run_bench = getattr(demo, "_surt_run_bench_file", None)
+        if run_bench is None:
+            raise RuntimeError("bench entrypoint missing on demo — build_app didn't expose _surt_run_bench_file")
+        run_bench(args.bench_wav)
+        return
+
     demo = build_app(backend)
     theme = gr.themes.Base(
         primary_hue="blue", neutral_hue="slate",

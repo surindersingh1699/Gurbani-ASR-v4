@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<title>gurbani_asr_v4 — eval/bench_one.py output for IZOsmkdmmcg</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+:root {
+  --bg: #15171c; --panel: #1d2028; --ink: #e4e6eb; --muted: #8a8f9a;
+  --ok: #6fa776; --bad: #c96a6e; --nil: rgba(255,255,255,0.06);
+  --accent: #b48ead;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI",
+  Helvetica, Arial, sans-serif; background: var(--bg); color: var(--ink);
+}
+.container { max-width: 1000px; margin: 0 auto; padding: 2rem 1.5rem 4rem; }
+h1 { font-size: 1.6rem; font-weight: 600; margin: 0 0 0.3rem; }
+.hdr-sub { color: var(--muted); margin: 0 0 2rem; font-size: 0.95rem; }
+.hdr-sub code { background: rgba(255,255,255,0.05); padding: 1px 5px;
+  border-radius: 3px; font-size: 0.85em; }
+.overall {
+  display: inline-flex; align-items: baseline; gap: 0.5rem;
+  background: var(--panel); padding: 0.75rem 1rem; border-radius: 6px;
+  margin-bottom: 2rem;
+}
+.overall .num { font-size: 1.4rem; font-weight: 600; color: var(--accent); }
+.overall .lbl { color: var(--muted); font-size: 0.85rem; }
+.tiles { display: flex; flex-direction: column; gap: 1.25rem; }
+.tile { background: var(--panel); border-radius: 8px; padding: 1rem 1.25rem 0.75rem; }
+.tile-head {
+  display: flex; justify-content: space-between; align-items: flex-start;
+  gap: 1rem; margin-bottom: 0.75rem;
+}
+.tile-head h2 { font-size: 0.95rem; margin: 0; font-family: ui-monospace, monospace; }
+.tile-head .sub { margin: 0.15rem 0 0; font-size: 0.8rem; color: var(--muted); }
+.acc { font-size: 1.3rem; font-weight: 600; font-variant-numeric: tabular-nums; }
+.acc-good { color: var(--ok); }
+.acc-mid  { color: #d2a56e; }
+.acc-bad  { color: var(--bad); }
+
+/* Rows: [label][strip-wrap]. Each strip-wrap is positioned relative so UEM
+   masks are correctly aligned to the strip itself, not the whole grid. */
+.rows { display: flex; flex-direction: column; gap: 3px; }
+.row { display: flex; align-items: center; gap: 0.5rem; }
+.strip-label {
+  width: 2.5rem; flex-shrink: 0;
+  font-size: 0.7rem; color: var(--muted); text-align: right;
+  font-family: ui-monospace, monospace;
+}
+.strip-wrap { position: relative; flex: 1 1 auto; min-width: 0; }
+.strip {
+  height: 18px; border-radius: 2px; overflow: hidden; display: flex;
+  background: repeating-linear-gradient(45deg,
+    rgba(255,255,255,0.02) 0 6px, rgba(255,255,255,0.04) 6px 12px);
+}
+.strip.diff { height: 6px; border-radius: 1px; }
+.strip .seg { display: block; height: 100%; transition: opacity 0.12s; }
+.strip .seg.seg-null { background: transparent; }
+.strip.diff .seg.d-ok  { background: var(--ok); }
+.strip.diff .seg.d-bad { background: var(--bad); }
+.strip.diff .seg.d-nil { background: var(--nil); }
+
+/* UEM overlay — lives inside strip-wrap, so never misaligned. */
+.uem-mask {
+  position: absolute; top: 0; bottom: 0;
+  background: rgba(10,11,14,0.7);
+  pointer-events: none;
+  border-right: 1px dashed rgba(255,255,255,0.18);
+}
+.uem-mask.uem-left  { left: 0; }
+.uem-mask.uem-right { right: 0; border-right: none; border-left: 1px dashed rgba(255,255,255,0.18); }
+
+/* Hover-highlight: dim all segments except those matching the hovered line */
+.tile.hover-line .strip .seg[data-line] { opacity: 0.18; }
+.tile.hover-line .strip .seg.hl-match   { opacity: 1; outline: 1px solid rgba(255,255,255,0.5); outline-offset: -1px; }
+
+/* Hover text panel — two rows, always present, populates on hover */
+.hover-panel {
+  margin-top: 0.6rem;
+  padding: 0.5rem 0.6rem;
+  background: rgba(255,255,255,0.02);
+  border-radius: 4px;
+  font-size: 0.9rem;
+  line-height: 1.4;
+  min-height: 2.6rem;
+}
+.hp-row { display: flex; gap: 0.5rem; align-items: baseline; }
+.hp-tag {
+  width: 2.5rem; flex-shrink: 0;
+  font-size: 0.7rem; color: var(--muted);
+  font-family: ui-monospace, monospace; text-align: right;
+  padding-top: 0.15rem;
+}
+.hp-gt   .hp-tag { color: #6c8cb5; }
+.hp-pred .hp-tag { color: #b48ead; }
+.hp-text { flex: 1 1 auto; color: var(--ink); }
+.hp-text:empty::before { content: attr(data-empty); color: var(--muted); font-style: italic; }
+.hp-text.diff-wrong { color: var(--bad); }
+.hp-text.diff-ok    { color: var(--ok); }
+
+.tile-foot { margin-top: 0.75rem; padding-top: 0.5rem; border-top: 1px solid rgba(255,255,255,0.05); }
+.tile-foot audio { width: 100%; height: 32px; }
+.no-audio { color: var(--muted); font-size: 0.8rem; margin: 0; }
+footer.page {
+  margin-top: 3rem; color: var(--muted); font-size: 0.8rem; text-align: center;
+}
+footer.page a { color: var(--accent); }
+</style>
+</head><body>
+<div class="container">
+  <h1>gurbani_asr_v4 — eval/bench_one.py output for IZOsmkdmmcg</h1>
+  <p class="hdr-sub">
+    Live Captioning for Gurbani Kirtan benchmark ·
+    pred = <code>/Users/karan/scratch/Gurbani-ASR-v4/eval/baseline</code> ·
+    gt = <code>test</code> ·
+    collar = 2s
+  </p>
+  <div class="overall">
+    <span class="num">39.8%</span>
+    <span class="lbl">overall frame accuracy (181/455 frames over 1 cases)</span>
+  </div>
+  <div class="tiles">
+    
+<article class="tile">
+  <header class="tile-head">
+    <div>
+      <h2>IZOsmkdmmcg</h2>
+      <p class="sub">shabad S4377 · 7:40 · UEM 0s–455s</p>
+    </div>
+    <div class="acc acc-bad">39.8%</div>
+  </header>
+  <div class="rows">
+    <div class="row">
+      <div class="strip-label">GT</div>
+      <div class="strip-wrap"><div class="strip row-gt"><span class="seg" data-line="1" data-text="ਪੋਥੀ ਪਰਮੇਸਰ ਕਾ ਥਾਨੁ ॥" data-range="0–38s" style="width:8.261%;background:#9b6a9e"></span><span class="seg seg-null" style="width:0.652%" data-range="38–41s"></span><span class="seg" data-line="2" data-text="ਸਾਧਸੰਗਿ ਗਾਵਹਿ ਗੁਣ ਗੋਬਿੰਦ ਪੂਰਨ ਬ੍ਰਹਮ ਗਿਆਨੁ ॥੧॥ ਰਹਾਉ ॥" data-range="41–67s" style="width:5.652%;background:#6aa67a"></span><span class="seg seg-null" style="width:0.435%" data-range="67–69s"></span><span class="seg" data-line="1" data-text="ਪੋਥੀ ਪਰਮੇਸਰ ਕਾ ਥਾਨੁ ॥" data-range="69–86s" style="width:3.696%;background:#9b6a9e"></span><span class="seg seg-null" style="width:2.826%" data-range="86–99s"></span><span class="seg" data-line="3" data-text="ਸਾਧਿਕ ਸਿਧ ਸਗਲ ਮੁਨਿ ਲੋਚਹਿ ਬਿਰਲੇ ਲਾਗੈ ਧਿਆਨੁ ॥" data-range="99–135s" style="width:7.826%;background:#b08454"></span><span class="seg seg-null" style="width:0.435%" data-range="135–137s"></span><span class="seg" data-line="4" data-text="ਜਿਸਹਿ ਕ੍ਰਿਪਾਲੁ ਹੋਇ ਮੇਰਾ ਸੁਆਮੀ ਪੂਰਨ ਤਾ ਕੋ ਕਾਮੁ ॥੧॥" data-range="137–163s" style="width:5.652%;background:#8b6fb8"></span><span class="seg seg-null" style="width:0.435%" data-range="163–165s"></span><span class="seg" data-line="1" data-text="ਪੋਥੀ ਪਰਮੇਸਰ ਕਾ ਥਾਨੁ ॥" data-range="165–180s" style="width:3.261%;background:#9b6a9e"></span><span class="seg seg-null" style="width:0.652%" data-range="180–183s"></span><span class="seg" data-line="2" data-text="ਸਾਧਸੰਗਿ ਗਾਵਹਿ ਗੁਣ ਗੋਬਿੰਦ ਪੂਰਨ ਬ੍ਰਹਮ ਗਿਆਨੁ ॥੧॥ ਰਹਾਉ ॥" data-range="183–208s" style="width:5.435%;background:#6aa67a"></span><span class="seg" data-line="1" data-text="ਪੋਥੀ ਪਰਮੇਸਰ ਕਾ ਥਾਨੁ ॥" data-range="208–226s" style="width:3.913%;background:#9b6a9e"></span><span class="seg seg-null" style="width:3.696%" data-range="226–243s"></span><span class="seg" data-line="5" data-text="ਜਾ ਕੈ ਰਿਦੈ ਵਸੈ ਭੈ ਭੰਜਨੁ ਤਿਸੁ ਜਾਨੈ ਸਗਲ ਜਹਾਨੁ ॥" data-range="243–278s" style="width:7.609%;background:#a76d6d"></span><span class="seg seg-null" style="width:0.435%" data-range="278–280s"></span><span class="seg" data-line="6" data-text="ਖਿਨੁ ਪਲੁ ਬਿਸਰੁ ਨਹੀ ਮੇਰੇ ਕਰਤੇ ਇਹੁ ਨਾਨਕੁ ਮਾਂਗੈ ਦਾਨੁ ॥੨॥੯੦॥੧੧੩॥" data-range="280–306s" style="width:5.652%;background:#5c9fa8"></span><span class="seg seg-null" style="width:0.217%" data-range="306–307s"></span><span class="seg" data-line="1" data-text="ਪੋਥੀ ਪਰਮੇਸਰ ਕਾ ਥਾਨੁ ॥" data-range="307–323s" style="width:3.478%;background:#9b6a9e"></span><span class="seg seg-null" style="width:0.217%" data-range="323–324s"></span><span class="seg" data-line="2" data-text="ਸਾਧਸੰਗਿ ਗਾਵਹਿ ਗੁਣ ਗੋਬਿੰਦ ਪੂਰਨ ਬ੍ਰਹਮ ਗਿਆਨੁ ॥੧॥ ਰਹਾਉ ॥" data-range="324–349s" style="width:5.435%;background:#6aa67a"></span><span class="seg seg-null" style="width:0.217%" data-range="349–350s"></span><span class="seg" data-line="1" data-text="ਪੋਥੀ ਪਰਮੇਸਰ ਕਾ ਥਾਨੁ ॥" data-range="350–365s" style="width:3.261%;background:#9b6a9e"></span><span class="seg seg-null" style="width:0.435%" data-range="365–367s"></span><span class="seg" data-line="2" data-text="ਸਾਧਸੰਗਿ ਗਾਵਹਿ ਗੁਣ ਗੋਬਿੰਦ ਪੂਰਨ ਬ੍ਰਹਮ ਗਿਆਨੁ ॥੧॥ ਰਹਾਉ ॥" data-range="367–391s" style="width:5.217%;background:#6aa67a"></span><span class="seg seg-null" style="width:0.217%" data-range="391–392s"></span><span class="seg" data-line="1" data-text="ਪੋਥੀ ਪਰਮੇਸਰ ਕਾ ਥਾਨੁ ॥" data-range="392–456s" style="width:13.913%;background:#9b6a9e"></span><span class="seg seg-null" style="width:0.870%" data-range="456–460s"></span></div><div class="uem-mask uem-right" style="width:1.087%" title="outside UEM (455s–460s) — not scored"></div></div>
+    </div>
+    <div class="row">
+      <div class="strip-label">Pred</div>
+      <div class="strip-wrap"><div class="strip row-pred"><span class="seg seg-null" style="width:2.174%" data-range="0–10s"></span><span class="seg" data-line="1" data-text="ਪੋਥੀ ਪਰਮੇਸਰ ਕਾ ਥਾਨੁ ॥" data-range="10–43s" style="width:7.174%;background:#9b6a9e"></span><span class="seg" data-line="2" data-text="ਸਾਧਸੰਗਿ ਗਾਵਹਿ ਗੁਣ ਗੋਬਿੰਦ ਪੂਰਨ ਬ੍ਰਹਮ ਗਿਆਨੁ ॥੧॥ ਰਹਾਉ ॥" data-range="43–70s" style="width:5.870%;background:#6aa67a"></span><span class="seg" data-line="3" data-text="ਸਾਧਿਕ ਸਿਧ ਸਗਲ ਮੁਨਿ ਲੋਚਹਿ ਬਿਰਲੇ ਲਾਗੈ ਧਿਆਨੁ ॥" data-range="70–72s" style="width:0.435%;background:#b08454"></span><span class="seg" data-line="1" data-text="ਪੋਥੀ ਪਰਮੇਸਰ ਕਾ ਥਾਨੁ ॥" data-range="72–74s" style="width:0.435%;background:#9b6a9e"></span><span class="seg seg-nomatch" data-line="—" data-text="ਊਚੀ ਹੂੰ ਊਚਾ ਥਾਨੁ ਅਗਮ ਅਪਾਰੀਆ ॥" data-range="74–82s" style="width:1.739%;background:repeating-linear-gradient(45deg, #b04545, #b04545 4px, #7a2e2e 4px, #7a2e2e 8px)"></span><span class="seg seg-nomatch" data-line="—" data-text="ਸਾਧਸੰਗਤਿ ਨਾਨਕੁ ਭਇਓ ਮੁਕਤਾ ਦਰਸਨੁ ਪੇਖਤ ਭੋਰੀ ॥੨॥੩੭॥੬੦॥" data-range="82–90s" style="width:1.739%;background:repeating-linear-gradient(45deg, #b04545, #b04545 4px, #7a2e2e 4px, #7a2e2e 8px)"></span><span class="seg seg-nomatch" data-line="—" data-text="ਰਾਮ ਨਾਮੁ ਪੜਹੁ ਗਤਿ ਪਾਵਹੁ ਸਤਸੰਗਤਿ ਗੁਰਿ ਨਿਸਤਾਰੇ ॥੩॥" data-range="90–98s" style="width:1.739%;background:repeating-linear-gradient(45deg, #b04545, #b04545 4px, #7a2e2e 4px, #7a2e2e 8px)"></span><span class="seg seg-nomatch" data-line="—" data-text="ਸੰਤਸੰਗਿ ਲਗਿ ਏਹੁ ਸੁਖੁ ਪਾਇਓ ਹਰਿ ਗੁਨ ਸਦ ਹੀ ਗਾਵੈ ॥੩॥" data-range="98–106s" style="width:1.739%;background:repeating-linear-gradient(45deg, #b04545, #b04545 4px, #7a2e2e 4px, #7a2e2e 8px)"></span><span class="seg seg-nomatch" data-line="—" data-text="ਸਾਧ ਕੈ ਸੰਗਿ ਉਨਿ ਭਉਜਲੁ ਤਰਿਆ ਸਗਲ ਦੂਤ ਉਨਿ ਸਾਧੇ ਜੀਉ ॥੩॥" data-range="106–130s" style="width:5.217%;background:repeating-linear-gradient(45deg, #b04545, #b04545 4px, #7a2e2e 4px, #7a2e2e 8px)"></span><span class="seg seg-nomatch" data-line="—" data-text="ਹਰਿ ਹਰਿ ਨਾਮੁ ਅਉਖਧੁ ਮੁਖਿ ਦੇਵੈ ਕਾਟੈ ਜਮ ਕੀ ਫੰਧਾ ॥੧॥ ਰਹਾਉ ॥" data-range="130–170s" style="width:8.696%;background:repeating-linear-gradient(45deg, #b04545, #b04545 4px, #7a2e2e 4px, #7a2e2e 8px)"></span><span class="seg seg-nomatch" data-line="—" data-text="ਜਿਸੁ ਹੋਇ ਕ੍ਰਿਪਾਲੁ ਸੋਈ ਬਿਧਿ ਬੂਝੈ ਤਾ ਕੀ ਨਿਰਮਲ ਰੀਤਿ ॥੧॥ ਰਹਾਉ ॥" data-range="170–218s" style="width:10.435%;background:repeating-linear-gradient(45deg, #b04545, #b04545 4px, #7a2e2e 4px, #7a2e2e 8px)"></span><span class="seg seg-nomatch" data-line="—" data-text="ਸਤਿਗੁਰੁ ਮਿਲੈ ਤਾ ਨਾਮੁ ਦਿੜਾਏ ਸਭਿ ਕਿਲਵਿਖ ਕਟਣਹਾਰੁ ॥" data-range="218–226s" style="width:1.739%;background:repeating-linear-gradient(45deg, #b04545, #b04545 4px, #7a2e2e 4px, #7a2e2e 8px)"></span><span class="seg seg-nomatch" data-line="—" data-text="ਗੁਰ ਪਰਸਾਦੀ ਕੋ ਨਾਮੁ ਧਿਆਏ ਤਿਸੁ ਹਉਮੈ ਵਿਚਹੁ ਜਾਇ ॥" data-range="226–250s" style="width:5.217%;background:repeating-linear-gradient(45deg, #b04545, #b04545 4px, #7a2e2e 4px, #7a2e2e 8px)"></span><span class="seg" data-line="5" data-text="ਜਾ ਕੈ ਰਿਦੈ ਵਸੈ ਭੈ ਭੰਜਨੁ ਤਿਸੁ ਜਾਨੈ ਸਗਲ ਜਹਾਨੁ ॥" data-range="250–281s" style="width:6.739%;background:#a76d6d"></span><span class="seg" data-line="6" data-text="ਖਿਨੁ ਪਲੁ ਬਿਸਰੁ ਨਹੀ ਮੇਰੇ ਕਰਤੇ ਇਹੁ ਨਾਨਕੁ ਮਾਂਗੈ ਦਾਨੁ ॥੨॥੯੦॥੧੧੩॥" data-range="281–310s" style="width:6.304%;background:#5c9fa8"></span><span class="seg" data-line="1" data-text="ਪੋਥੀ ਪਰਮੇਸਰ ਕਾ ਥਾਨੁ ॥" data-range="310–325s" style="width:3.261%;background:#9b6a9e"></span><span class="seg" data-line="5" data-text="ਜਾ ਕੈ ਰਿਦੈ ਵਸੈ ਭੈ ਭੰਜਨੁ ਤਿਸੁ ਜਾਨੈ ਸਗਲ ਜਹਾਨੁ ॥" data-range="325–326s" style="width:0.217%;background:#a76d6d"></span><span class="seg" data-line="2" data-text="ਸਾਧਸੰਗਿ ਗਾਵਹਿ ਗੁਣ ਗੋਬਿੰਦ ਪੂਰਨ ਬ੍ਰਹਮ ਗਿਆਨੁ ॥੧॥ ਰਹਾਉ ॥" data-range="326–352s" style="width:5.652%;background:#6aa67a"></span><span class="seg" data-line="1" data-text="ਪੋਥੀ ਪਰਮੇਸਰ ਕਾ ਥਾਨੁ ॥" data-range="352–378s" style="width:5.652%;background:#9b6a9e"></span><span class="seg seg-nomatch" data-line="—" data-text="ਮਨ ਮੇਰੇ ਗੁਰਮੁਖਿ ਨਾਮੁ ਧਿਆਇ ॥" data-range="378–394s" style="width:3.478%;background:repeating-linear-gradient(45deg, #b04545, #b04545 4px, #7a2e2e 4px, #7a2e2e 8px)"></span><span class="seg seg-nomatch" data-line="—" data-text="ਸਦਾ ਜਾਗਹਿ ਘਰੁ ਅਪਣਾ ਰਾਖਹਿ ਪੰਚ ਤਸਕਰ ਕਾਢਹਿ ਮਾਰਿ ॥੧॥" data-range="394–447s" style="width:11.522%;background:repeating-linear-gradient(45deg, #b04545, #b04545 4px, #7a2e2e 4px, #7a2e2e 8px)"></span><span class="seg seg-nomatch" data-line="—" data-text="ਗੁਰਮੁਖਿ ਸਹਜ ਧੁਨਿ ਊਪਜੈ ਦੁਖੁ ਹਉਮੈ ਵਿਚਹੁ ਜਾਇ ॥" data-range="447–458s" style="width:2.391%;background:repeating-linear-gradient(45deg, #b04545, #b04545 4px, #7a2e2e 4px, #7a2e2e 8px)"></span><span class="seg seg-null" style="width:0.435%" data-range="458–460s"></span></div><div class="uem-mask uem-right" style="width:1.087%" title="outside UEM (455s–460s) — not scored"></div></div>
+    </div>
+    <div class="row">
+      <div class="strip-label">Diff</div>
+      <div class="strip-wrap"><div class="strip diff"><span class="seg d-ok" style="width:0.435%"></span><span class="seg d-bad" style="width:1.739%"></span><span class="seg d-ok" style="width:13.043%"></span><span class="seg d-bad" style="width:0.435%"></span><span class="seg d-ok" style="width:0.435%"></span><span class="seg d-bad" style="width:38.261%"></span><span class="seg d-ok" style="width:12.826%"></span><span class="seg d-bad" style="width:0.217%"></span><span class="seg d-ok" style="width:3.261%"></span><span class="seg d-bad" style="width:0.217%"></span><span class="seg d-ok" style="width:9.348%"></span><span class="seg d-bad" style="width:18.696%"></span><span class="seg d-nil" style="width:1.087%"></span></div></div>
+    </div>
+  </div>
+  <div class="hover-panel" aria-hidden="true">
+    <div class="hp-row hp-gt"><span class="hp-tag">GT</span><span class="hp-text" data-empty="hover a segment to see the line"></span></div>
+    <div class="hp-row hp-pred"><span class="hp-tag">Pred</span><span class="hp-text" data-empty="—"></span></div>
+  </div>
+  <footer class="tile-foot">
+    <p class="no-audio">audio not provided — see README to fetch</p>
+  </footer>
+</article>
+
+  </div>
+  <footer class="page">
+    Rendered by <code>visualize.py</code>.
+    Grey band = outside UEM (unscored).
+    Diff row: green = correct, red = wrong, faint = unscored.
+    Hover anywhere over a strip to see the canonical line at that moment
+    (GT vs Pred — red when they disagree).
+  </footer>
+</div>
+
+<script>
+document.querySelectorAll('.tile').forEach(tile => {
+  const panel = tile.querySelector('.hover-panel');
+  const gtText = panel && panel.querySelector('.hp-gt .hp-text');
+  const prdText = panel && panel.querySelector('.hp-pred .hp-text');
+  const gtStrip = tile.querySelector('.strip.row-gt');
+  const prdStrip = tile.querySelector('.strip.row-pred');
+
+  function segAt(strip, clientX) {
+    if (!strip) return null;
+    const rect = strip.getBoundingClientRect();
+    if (clientX < rect.left || clientX > rect.right) return null;
+    // Return the .seg whose horizontal bounds contain clientX.
+    for (const seg of strip.children) {
+      const r = seg.getBoundingClientRect();
+      if (clientX >= r.left && clientX <= r.right) return seg;
+    }
+    return null;
+  }
+
+  function clearHighlights() {
+    tile.classList.remove('hover-line');
+    tile.querySelectorAll('.strip .seg.hl-match').forEach(m => m.classList.remove('hl-match'));
+  }
+
+  function setPanel(el, seg) {
+    if (!el) return;
+    if (!seg || !seg.dataset || !seg.dataset.line) {
+      el.textContent = '';
+      el.classList.remove('diff-ok', 'diff-wrong');
+      return;
+    }
+    el.textContent = seg.dataset.text || ('line ' + seg.dataset.line);
+  }
+
+  tile.addEventListener('mousemove', (e) => {
+    const gtSeg = segAt(gtStrip, e.clientX);
+    const prdSeg = segAt(prdStrip, e.clientX);
+    setPanel(gtText, gtSeg);
+    setPanel(prdText, prdSeg);
+
+    clearHighlights();
+    const activeSeg = (e.target.closest('.strip .seg') && e.target.closest('.strip .seg').dataset.line)
+      ? e.target.closest('.strip .seg') : (gtSeg || prdSeg);
+    if (activeSeg && activeSeg.dataset && activeSeg.dataset.line) {
+      const line = activeSeg.dataset.line;
+      tile.classList.add('hover-line');
+      tile.querySelectorAll('.strip .seg[data-line="' + line + '"]').forEach(m => m.classList.add('hl-match'));
+    }
+
+    // Color GT/Pred text based on agreement at this moment.
+    if (gtText && prdText) {
+      const g = gtSeg && gtSeg.dataset.line;
+      const p = prdSeg && prdSeg.dataset.line;
+      gtText.classList.remove('diff-ok', 'diff-wrong');
+      prdText.classList.remove('diff-ok', 'diff-wrong');
+      if (g && p) {
+        const cls = (g === p) ? 'diff-ok' : 'diff-wrong';
+        gtText.classList.add(cls);
+        prdText.classList.add(cls);
+      }
+    }
+  });
+
+  tile.addEventListener('mouseleave', () => {
+    clearHighlights();
+    if (gtText)  { gtText.textContent = '';  gtText.classList.remove('diff-ok','diff-wrong'); }
+    if (prdText) { prdText.textContent = ''; prdText.classList.remove('diff-ok','diff-wrong'); }
+  });
+});
+</script>
+
+</body></html>
