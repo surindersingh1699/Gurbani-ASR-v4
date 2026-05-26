@@ -104,9 +104,9 @@ model:
 
   decoder:
     _target_: nemo.collections.asr.modules.ConvASRDecoder
-    feat_in: null
-    num_classes: -1                # filled by NeMo from len(labels) + blank
-    vocabulary: null               # filled by NeMo from labels
+    feat_in: ${model.encoder.d_model}
+    num_classes: -1                # derived from len(vocabulary); blank added internally
+    vocabulary: ${model.labels}    # hydra interpolation — explicit so ConvASRDecoder __init__ sees it
 
   optim:
     name: adamw
