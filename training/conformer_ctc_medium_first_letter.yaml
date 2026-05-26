@@ -1,0 +1,160 @@
+# Conformer-CTC Medium for STTM-ASCII first-letter anchor prediction.
+#
+# PLAN.md M1.2/M1.3: ~32M-param NeMo Conformer-CTC Medium, char vocab over
+# STTM-ASCII first letters + '|' delimiter. Target hardware: 1x A40 48GB.
+#
+# Vocab is fixed at config-load time. The list is derived from the AnmolLipi
+# spoken-letter set seen in database.sqlite.lines.first_letters plus the
+# delimiter. Keep alphabetical-by-codepoint order so the tokenizer index is
+# stable across runs.
+
+name: "conformer-ctc-medium-first-letter"
+
+model:
+  sample_rate: 16000
+  log_prediction: true            # we want to *see* anchor decodes
+  ctc_reduction: 'mean_volume'
+  skip_nan_grad: true
+
+  # Character vocab — 40 tokens + blank. Order is alphabetical/stable.
+  labels: ["|",
+           "A", "B", "C", "D", "E", "F", "G", "J", "K",
+           "N", "P", "Q", "T", "V", "X",
+           "a", "b", "c", "d", "e", "f", "g", "h", "j",
+           "k", "l", "m", "n", "p", "q", "r", "s", "t",
+           "u", "v", "w", "x"]
+
+  train_ds:
+    manifest_filepath: /workspace/data/manifests/anchor_first_letter_train.jsonl
+    sample_rate: 16000
+    batch_size: 64                # A40 48GB headroom — Conformer-Medium is small
+    shuffle: true
+    num_workers: 8
+    pin_memory: true
+    persistent_workers: true
+    prefetch_factor: 4
+    trim_silence: false
+    max_duration: 18.0
+    min_duration: 0.5
+    is_tarred: false
+    use_start_end_token: false
+    bucketing_strategy: "synced_randomized"
+
+  validation_ds:
+    manifest_filepath: /workspace/data/manifests/anchor_first_letter_val.jsonl
+    sample_rate: 16000
+    batch_size: 32
+    shuffle: false
+    num_workers: 4
+    pin_memory: true
+    persistent_workers: true
+    use_start_end_token: false
+
+  test_ds:
+    manifest_filepath: /workspace/data/manifests/anchor_first_letter_eval_by_domain.jsonl
+    sample_rate: 16000
+    batch_size: 32
+    shuffle: false
+    num_workers: 4
+    pin_memory: true
+    use_start_end_token: false
+
+  preprocessor:
+    _target_: nemo.collections.asr.modules.AudioToMelSpectrogramPreprocessor
+    sample_rate: 16000
+    normalize: "per_feature"
+    window_size: 0.025
+    window_stride: 0.01
+    window: "hann"
+    features: 80
+    n_fft: 512
+    log: true
+    frame_splicing: 1
+    dither: 0.00001
+    pad_to: 16
+    pad_value: 0.0
+
+  spec_augment:
+    _target_: nemo.collections.asr.modules.SpectrogramAugmentation
+    freq_masks: 2
+    time_masks: 5
+    freq_width: 27
+    time_width: 0.05
+
+  encoder:
+    _target_: nemo.collections.asr.modules.ConformerEncoder
+    feat_in: 80
+    feat_out: -1
+    n_layers: 16
+    d_model: 256
+    n_heads: 4
+    ff_expansion_factor: 4         # d_ff = 1024 (PLAN.md spec)
+    self_attention_model: "rel_pos"
+    pos_emb_max_len: 5000
+    att_context_size: [-1, -1]
+    xscaling: true
+    untie_biases: true
+    conv_kernel_size: 31
+    dropout: 0.1
+    dropout_emb: 0.0
+    dropout_att: 0.1
+    subsampling: "striding"
+    subsampling_factor: 4
+    subsampling_conv_channels: -1   # default = d_model
+
+  decoder:
+    _target_: nemo.collections.asr.modules.ConvASRDecoder
+    feat_in: null
+    num_classes: -1                # filled by NeMo from len(labels) + blank
+    vocabulary: null               # filled by NeMo from labels
+
+  optim:
+    name: adamw
+    lr: 5.0e-4                     # from-scratch Conformer-Medium peak
+    betas: [0.9, 0.98]
+    weight_decay: 1.0e-3
+    sched:
+      name: CosineAnnealing
+      warmup_steps: 1500
+      min_lr: 1.0e-6
+
+trainer:
+  devices: 1
+  accelerator: gpu
+  num_nodes: 1
+  max_epochs: 80
+  max_steps: 25000               # ~50k steps total cap; will early-stop sooner
+  accumulate_grad_batches: 2     # effective batch 128
+  gradient_clip_val: 1.0
+  precision: bf16-mixed
+  log_every_n_steps: 50
+  val_check_interval: 1000
+  check_val_every_n_epoch: 1
+  num_sanity_val_steps: 2
+  enable_checkpointing: false
+  benchmark: true
+  logger: false
+
+exp_manager:
+  exp_dir: /workspace/checkpoints/anchor-first-letter
+  name: anchor-first-letter
+  create_tensorboard_logger: true
+  create_wandb_logger: false
+  resume_if_exists: true
+  resume_ignore_no_checkpoint: true
+
+  create_early_stopping_callback: true
+  early_stopping_callback_params:
+    monitor: "val_wer"             # NeMo uses WER over the char vocab — proxy
+    mode: "min"
+    min_delta: 0.005
+    patience: 5
+    verbose: true
+
+  checkpoint_callback_params:
+    monitor: "val_wer"
+    mode: "min"
+    save_top_k: 2
+    save_last: true
+    always_save_nemo: true
+    filename: "{epoch}-step{step}-val_wer{val_wer:.4f}"
