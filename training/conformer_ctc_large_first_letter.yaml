@@ -1,0 +1,160 @@
+# Conformer-CTC Large for STTM-ASCII first-letter anchor prediction — v2.
+#
+# Architecture mirrors ai4bharat/indicconformer_stt_pa_hybrid_ctc_rnnt_large so
+# we can load that model's (or surindersinghssj/indicconformer-pa-v3-kirtan's)
+# encoder weights without shape mismatches.
+#
+# Decoder is replaced with a tiny 38-class CTC head over STTM-ASCII first
+# letters + the '|' delimiter (same vocab as v1).
+
+name: "conformer-ctc-large-first-letter-v2"
+
+model:
+  sample_rate: 16000
+  log_prediction: true
+  ctc_reduction: 'mean_volume'
+  skip_nan_grad: true
+
+  labels: ["|",
+           "A", "B", "C", "D", "E", "F", "G", "J", "K",
+           "N", "P", "Q", "T", "V", "X",
+           "a", "b", "c", "d", "e", "f", "g", "h", "j",
+           "k", "l", "m", "n", "p", "q", "r", "s", "t",
+           "u", "v", "w", "x"]
+
+  train_ds:
+    manifest_filepath: /workspace/data/manifests/v2_anchor_train.jsonl
+    sample_rate: 16000
+    batch_size: 32                 # Large model — halve batch vs Medium
+    shuffle: true
+    num_workers: 8
+    pin_memory: true
+    persistent_workers: true
+    prefetch_factor: 4
+    trim_silence: false
+    max_duration: 18.0
+    min_duration: 0.5
+    is_tarred: false
+    use_start_end_token: false
+    bucketing_strategy: "synced_randomized"
+
+  validation_ds:
+    manifest_filepath: /workspace/data/manifests/v2_anchor_val_seen_sehaj.jsonl
+    sample_rate: 16000
+    batch_size: 32
+    shuffle: false
+    num_workers: 4
+    pin_memory: true
+    persistent_workers: true
+    use_start_end_token: false
+
+  test_ds:
+    manifest_filepath: /workspace/data/manifests/v2_anchor_val_unseen_ragi.jsonl
+    sample_rate: 16000
+    batch_size: 32
+    shuffle: false
+    num_workers: 4
+    use_start_end_token: false
+
+  preprocessor:
+    _target_: nemo.collections.asr.modules.AudioToMelSpectrogramPreprocessor
+    sample_rate: 16000
+    normalize: "per_feature"
+    window_size: 0.025
+    window_stride: 0.01
+    window: "hann"
+    features: 80
+    n_fft: 512
+    log: true
+    frame_splicing: 1
+    dither: 0.00001
+    pad_to: 16
+    pad_value: 0.0
+
+  spec_augment:
+    _target_: nemo.collections.asr.modules.SpectrogramAugmentation
+    freq_masks: 2
+    time_masks: 5
+    freq_width: 27
+    time_width: 0.05
+
+  encoder:
+    # MUST match IndicConformer-pa-large for encoder weight transfer.
+    _target_: nemo.collections.asr.modules.ConformerEncoder
+    feat_in: 80
+    feat_out: -1
+    n_layers: 18
+    d_model: 512
+    n_heads: 8
+    ff_expansion_factor: 4         # d_ff = 2048
+    self_attention_model: "rel_pos"
+    pos_emb_max_len: 5000
+    att_context_size: [-1, -1]
+    xscaling: true
+    untie_biases: true
+    conv_kernel_size: 31
+    dropout: 0.1
+    dropout_emb: 0.0
+    dropout_att: 0.1
+    subsampling: "striding"
+    subsampling_factor: 4
+    subsampling_conv_channels: -1
+
+  decoder:
+    _target_: nemo.collections.asr.modules.ConvASRDecoder
+    feat_in: ${model.encoder.d_model}
+    num_classes: -1
+    vocabulary: ${model.labels}
+
+  optim:
+    name: adamw
+    # Discriminative LR — encoder is pretrained on Gurbani, decoder is fresh.
+    # Defaults below apply when train_anchor_continuous.py doesn't override.
+    lr: 3.0e-4                     # decoder lr
+    betas: [0.9, 0.98]
+    weight_decay: 1.0e-3
+    sched:
+      name: CosineAnnealing
+      warmup_steps: 800
+      min_lr: 1.0e-6
+
+trainer:
+  devices: 1
+  accelerator: gpu
+  num_nodes: 1
+  max_epochs: 50
+  max_steps: 8000                # pretrained init should converge much faster than v1
+  accumulate_grad_batches: 4     # effective batch = 32*4 = 128
+  gradient_clip_val: 1.0
+  precision: bf16-mixed
+  log_every_n_steps: 50
+  val_check_interval: 500
+  check_val_every_n_epoch: 1
+  num_sanity_val_steps: 2
+  enable_checkpointing: false
+  benchmark: true
+  logger: false
+
+exp_manager:
+  exp_dir: /workspace/checkpoints/anchor-large-v2
+  name: anchor-large-v2
+  create_tensorboard_logger: true
+  create_wandb_logger: false
+  resume_if_exists: true
+  resume_ignore_no_checkpoint: true
+
+  create_early_stopping_callback: true
+  early_stopping_callback_params:
+    monitor: "val_wer"
+    mode: "min"
+    min_delta: 0.005
+    patience: 5
+    verbose: true
+
+  checkpoint_callback_params:
+    monitor: "val_wer"
+    mode: "min"
+    save_top_k: 2
+    save_last: true
+    always_save_nemo: true
+    filename: "{epoch}-{step}-{val_wer:.4f}"
