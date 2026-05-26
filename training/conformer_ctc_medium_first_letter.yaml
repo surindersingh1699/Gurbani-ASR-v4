@@ -157,4 +157,8 @@ exp_manager:
     save_top_k: 2
     save_last: true
     always_save_nemo: true
-    filename: "{epoch}-step{step}-val_wer{val_wer:.4f}"
+    # NeMo's resume parser splits filename on '-' and expects each segment to
+    # be 'key=value'. Lightning auto-inserts 'key=' for each placeholder, so
+    # writing "step{step}" yields "stepstep=N" and breaks parsing on resume.
+    # Use bare placeholders.
+    filename: "{epoch}-{step}-{val_wer:.4f}"
