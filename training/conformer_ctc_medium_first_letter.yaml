@@ -123,12 +123,14 @@ trainer:
   accelerator: gpu
   num_nodes: 1
   max_epochs: 80
-  max_steps: 25000               # ~50k steps total cap; will early-stop sooner
+  max_steps: 15000               # ~30 epochs cap; tighter than 25k to keep inside budget
   accumulate_grad_batches: 2     # effective batch 128
   gradient_clip_val: 1.0
   precision: bf16-mixed
   log_every_n_steps: 50
-  val_check_interval: 1000
+  # Lightning requires val_check_interval (in optimizer steps) <= batches/epoch.
+  # 63098/64 = 986 batches/epoch, so cap at 500 (= ~half an epoch).
+  val_check_interval: 500
   check_val_every_n_epoch: 1
   num_sanity_val_steps: 2
   enable_checkpointing: false
