@@ -136,7 +136,13 @@ def main() -> int:
     args = ap.parse_args()
 
     import torch  # noqa: F401
-    import pytorch_lightning as pl
+    # NeMo 1.23+ requires the `lightning.pytorch` namespace, not legacy
+    # `pytorch_lightning`. Both ship together in lightning>=2.0 but NeMo
+    # isinstance-checks against the new one.
+    try:
+        import lightning.pytorch as pl
+    except ImportError:
+        import pytorch_lightning as pl
     from nemo.collections.asr.models import EncDecCTCModel
     from nemo.utils.exp_manager import exp_manager
 
