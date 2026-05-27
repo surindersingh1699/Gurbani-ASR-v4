@@ -49,7 +49,7 @@ model:
     use_start_end_token: false
 
   test_ds:
-    manifest_filepath: /workspace/data/manifests/v2_anchor_val_unseen_ragi.jsonl
+    manifest_filepath: /workspace/data/manifests/v2_anchor_val_ragi.jsonl
     sample_rate: 16000
     batch_size: 32
     shuffle: false
