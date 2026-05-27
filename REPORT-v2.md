@@ -156,6 +156,46 @@ Two root causes:
 
 ---
 
+## v2.1 attempt — kirtan-validation fine-tune (FAILED, killed)
+
+To address v2.0's premature early-stop, v2.1 attempted to continue training from `surt-anchor-ctc-large-v2` with:
+- `validation_ds` switched to mixed kirtan (ragi+akj+sgpc, 513 clips)
+- LR lowered to 1e-4 (from 3e-4)
+- warmup 400 steps
+- `--resume-from-hf surindersinghssj/surt-anchor-ctc-large-v2`
+
+### Result: training stalled
+
+v2.1 training-time val_wer trajectory on kirtan-mixed:
+| Step | val_wer |
+|---|---|
+| 125 | 0.973 |
+| 250 | 0.971 |
+| 375 | 0.961 |
+| 500 | 0.961 (no movement) |
+| 625 | regressed |
+
+Killed after step 625 (~30 min GPU). Net delta from v2.0 baseline: ~0pp on kirtan.
+
+### Why v2.1 didn't work
+
+Three plausible causes (could be more than one):
+1. **Optimizer state reset**: `restore_from` loads model weights but creates a fresh optimizer. The model effectively had to re-learn its gradient direction from a noisy mid-training point.
+2. **LR mismatch**: 1e-4 may have been simultaneously too high (the encoder was already adapted) and too low (the decoder needed to make big swings on the harder kirtan distribution). Should have used discriminative LR (encoder_lr=1e-5, decoder_lr=3e-4).
+3. **Metric mismatch**: NeMo's training-time `val_wer` on our delimited anchor strings treats `s|n|k` as one word with char-level edits, while the stratified eval splits on `|` and uses position-aligned match. So `0.96` training val_wer may correspond to ~55% stratified WER — close to v2.0's baseline 52-69%, meaning v2.1 was likely never going to show meaningful improvement on this metric form.
+
+### Real lesson for v2.2
+
+A continuous-training refresh should use:
+- `--init-from-hf` (rebuild model from YAML config, copy encoder weights only) instead of `--resume-from-hf`, so the YAML's optimizer and LR schedule fully apply
+- Discriminative LR (encoder_lr ~10× lower than decoder_lr)
+- A separate `val_metric_callback` that computes the stratified-eval-style anchor-level WER, not NeMo's default CTC WER
+- More training steps (8000+) since fine-tuning kirtan from scratch is genuinely a hard signal
+
+These are all "real engineering" — not a quick fix. Reserved for a dedicated v2.2 push.
+
+---
+
 ## v2.x continuous training plan (recommended next steps)
 
 If GO or PARTIAL:
