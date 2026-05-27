@@ -47,33 +47,68 @@ def _download_nemo_from_hf(repo_id: str, filename_hint: str | None = None) -> st
     return hf_hub_download(repo_id=repo_id, filename=chosen, repo_type="model")
 
 
-def _build_ctc_model_with_pretrained_encoder(cfg, pretrained_nemo: str):
-    """Load a (possibly hybrid) pretrained NeMo model and copy its encoder into a fresh CTC model."""
+def _extract_encoder_state_from_nemo(pretrained_nemo: str) -> dict:
+    """Read a .nemo tarball directly and pull out encoder.* weights.
+
+    Avoids NeMo's restore_from path because (a) the saved model class may be
+    Hybrid RNNT-CTC-BPE which can't be instantiated without its tokenizer dir,
+    and (b) ModelPT itself is abstract. We only need the encoder weights here.
+    """
+    import tarfile
+    import tempfile
+
     import torch
-    from nemo.core import ModelPT
+
+    print(f"[init] opening .nemo tarball {pretrained_nemo}", flush=True)
+    with tarfile.open(pretrained_nemo, "r") as tf:
+        names = tf.getnames()
+        ckpt_name = next((n for n in names if n.endswith("model_weights.ckpt")), None)
+        if ckpt_name is None:
+            ckpt_name = next((n for n in names if n.endswith(".ckpt")), None)
+        if ckpt_name is None:
+            raise RuntimeError(f"No .ckpt file in {pretrained_nemo}; got {names[:5]}")
+        print(f"[init] extracting {ckpt_name}", flush=True)
+        with tempfile.TemporaryDirectory() as td:
+            tf.extract(ckpt_name, path=td)
+            ckpt_path = f"{td}/{ckpt_name}"
+            try:
+                state = torch.load(ckpt_path, map_location="cpu", weights_only=True)
+            except Exception:
+                state = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+    if isinstance(state, dict) and "state_dict" in state:
+        state = state["state_dict"]
+    enc_state = {k[len("encoder."):]: v for k, v in state.items()
+                 if k.startswith("encoder.")}
+    print(f"[init] extracted {len(enc_state)} encoder tensors "
+          f"(of {len(state)} total keys in checkpoint)", flush=True)
+    return enc_state
+
+
+def _build_ctc_model_with_pretrained_encoder(cfg, pretrained_nemo: str):
+    """Build a fresh EncDecCTCModel and copy pretrained encoder state into it."""
+    import torch
     from nemo.collections.asr.models import EncDecCTCModel
 
-    print(f"[init] loading pretrained model from {pretrained_nemo}", flush=True)
-    pretrained = ModelPT.restore_from(pretrained_nemo, map_location="cpu", strict=False)
-    pre_state = pretrained.encoder.state_dict()
-
-    print(f"[init] building fresh CTC model (will overwrite encoder)", flush=True)
+    enc_state = _extract_encoder_state_from_nemo(pretrained_nemo)
+    print(f"[init] building fresh CTC model", flush=True)
     model = EncDecCTCModel(cfg=cfg.model)
 
     own_state = model.encoder.state_dict()
-    copied = skipped = 0
-    for k, v in pre_state.items():
-        if k in own_state and own_state[k].shape == v.shape:
-            own_state[k] = v.clone()
-            copied += 1
-        else:
-            skipped += 1
+    copied = skipped_shape = missing_in_target = 0
+    for k, v in enc_state.items():
+        if k not in own_state:
+            missing_in_target += 1
+            continue
+        if own_state[k].shape != v.shape:
+            skipped_shape += 1
+            continue
+        own_state[k] = v.clone()
+        copied += 1
     model.encoder.load_state_dict(own_state)
-
-    del pretrained
     torch.cuda.empty_cache()
-    print(f"[init] encoder weights copied={copied}  skipped={skipped}  "
-          f"(skipped >0 is normal if pretrained had extra heads)", flush=True)
+    print(f"[init] encoder weights copied={copied}  "
+          f"skipped_shape={skipped_shape}  missing_in_target={missing_in_target}",
+          flush=True)
     return model
 
 
