@@ -203,6 +203,17 @@ def main():
     if args.resume_from_hf:
         nemo_path = _download_nemo_from_hf(args.resume_from_hf)
         model = EncDecCTCModel.restore_from(nemo_path, map_location="cpu")
+        # The restored config's train_ds/validation_ds may be stale (or None)
+        # because the .nemo was saved during early-stopping without re-saving
+        # the dataloader config. Force-override with our YAML's data configs.
+        model.setup_training_data(cfg.model.train_ds)
+        model.setup_validation_data(cfg.model.validation_ds)
+        if cfg.model.get("test_ds") is not None:
+            try:
+                model.setup_test_data(cfg.model.test_ds)
+            except Exception as e:
+                print(f"[resume] test_ds setup skipped: {e}", flush=True)
+        model.setup_optimization(cfg.model.optim)
         model._trainer = trainer
     elif args.init_from_hf:
         nemo_path = _download_nemo_from_hf(args.init_from_hf)
