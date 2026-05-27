@@ -39,7 +39,9 @@ model:
     bucketing_strategy: "synced_randomized"
 
   validation_ds:
-    manifest_filepath: /workspace/data/manifests/v2_anchor_val_seen_sehaj.jsonl
+    # v2.1: validate on mixed kirtan (ragi+akj+sgpc, 513 clips) so val_wer
+    # reflects the production target. Sehaj is already easy for this model.
+    manifest_filepath: /workspace/data/manifests/v2_anchor_val_kirtan_mixed.jsonl
     sample_rate: 16000
     batch_size: 32
     shuffle: false
@@ -108,14 +110,15 @@ model:
 
   optim:
     name: adamw
-    # Discriminative LR — encoder is pretrained on Gurbani, decoder is fresh.
-    # Defaults below apply when train_anchor_continuous.py doesn't override.
-    lr: 3.0e-4                     # decoder lr
+    # v2.1 LR: lower since we're continuing from a partially-trained model and
+    # the kirtan-heavy val will produce noisier updates. Encoder needs gentle
+    # fine-tuning on harder kirtan data.
+    lr: 1.0e-4
     betas: [0.9, 0.98]
     weight_decay: 1.0e-3
     sched:
       name: CosineAnnealing
-      warmup_steps: 800
+      warmup_steps: 400
       min_lr: 1.0e-6
 
 trainer:
@@ -136,8 +139,9 @@ trainer:
   logger: false
 
 exp_manager:
-  exp_dir: /workspace/checkpoints/anchor-large-v2
-  name: anchor-large-v2
+  # v2.1: separate exp_dir to avoid resume-collision with v2.0 checkpoints
+  exp_dir: /workspace/checkpoints/anchor-large-v2-1
+  name: anchor-large-v2-1
   create_tensorboard_logger: true
   create_wandb_logger: false
   resume_if_exists: true
