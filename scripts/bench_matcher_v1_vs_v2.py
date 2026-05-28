@@ -56,7 +56,8 @@ def _load_db_anchors_v1(db_path):
 
 def _try_beam_decode(model, files, batch_size=8, beam_size=5):
     """Try to get top-K CTC hypotheses via NeMo beam search.
-    Falls back to greedy if beam-search API isn't available.
+    Falls back to greedy if beam-search API isn't available OR if it errors
+    (e.g. KenLM not installed — beam search needs an LM in NeMo 1.23).
     """
     try:
         from nemo.collections.asr.parts.submodules.ctc_decoding import (
@@ -64,11 +65,16 @@ def _try_beam_decode(model, files, batch_size=8, beam_size=5):
         from omegaconf import OmegaConf
 
         # Switch decoding to beam search
-        decoding_cfg = OmegaConf.create(model.cfg.decoding) if "decoding" in model.cfg else OmegaConf.create({})
+        decoding_cfg = OmegaConf.create(
+            model.cfg.decoding) if "decoding" in model.cfg else OmegaConf.create({})
         decoding_cfg.strategy = "beam"
         if "beam" not in decoding_cfg:
             decoding_cfg.beam = OmegaConf.create({})
         decoding_cfg.beam.beam_size = beam_size
+        decoding_cfg.beam.return_best_hypothesis = False
+        # Some NeMo builds default to KenLM scoring — avoid that
+        decoding_cfg.beam.kenlm_path = None
+        decoding_cfg.beam.search_type = "default"
         decoding_cfg.beam.return_best_hypothesis = False
         model.change_decoding_strategy(decoding_cfg)
         hyps = _transcribe_compat(model, files, batch_size,
@@ -84,7 +90,16 @@ def _try_beam_decode(model, files, batch_size=8, beam_size=5):
                 out.append([h])
         return out, True
     except Exception as e:
-        print(f"[beam] not available ({e}); falling back to greedy top-1", flush=True)
+        print(f"[beam] not available ({type(e).__name__}: {e}); "
+              f"falling back to greedy top-1", flush=True)
+        # Reset decoder to greedy strategy explicitly so a failed beam attempt
+        # doesn't leave the model in a half-configured state.
+        try:
+            from omegaconf import OmegaConf
+            greedy_cfg = OmegaConf.create({"strategy": "greedy"})
+            model.change_decoding_strategy(greedy_cfg)
+        except Exception:
+            pass
         hyps = _transcribe_compat(model, files, batch_size)
         if hyps and hasattr(hyps[0], "text"):
             hyps = [h.text for h in hyps]
