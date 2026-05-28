@@ -71,8 +71,8 @@ def _try_beam_decode(model, files, batch_size=8, beam_size=5):
         decoding_cfg.beam.beam_size = beam_size
         decoding_cfg.beam.return_best_hypothesis = False
         model.change_decoding_strategy(decoding_cfg)
-        hyps = model.transcribe(audio=files, batch_size=batch_size,
-                                return_hypotheses=True)
+        hyps = _transcribe_compat(model, files, batch_size,
+                                  return_hypotheses=True)
         # NeMo returns nested list of hypotheses when return_best_hypothesis=False
         out = []
         for h in hyps:
@@ -85,10 +85,26 @@ def _try_beam_decode(model, files, batch_size=8, beam_size=5):
         return out, True
     except Exception as e:
         print(f"[beam] not available ({e}); falling back to greedy top-1", flush=True)
-        hyps = model.transcribe(audio=files, batch_size=batch_size)
+        hyps = _transcribe_compat(model, files, batch_size)
         if hyps and hasattr(hyps[0], "text"):
             hyps = [h.text for h in hyps]
         return [[h] for h in hyps], False
+
+
+def _transcribe_compat(model, files, batch_size, return_hypotheses=False):
+    """Cross-version wrapper for NeMo's model.transcribe().
+
+    Older NeMo (1.20-1.23): accepts `paths2audio_files=`.
+    Newer NeMo (1.24+):     accepts `audio=`.
+    """
+    try:
+        return model.transcribe(
+            paths2audio_files=files, batch_size=batch_size,
+            return_hypotheses=return_hypotheses)
+    except TypeError:
+        return model.transcribe(
+            audio=files, batch_size=batch_size,
+            return_hypotheses=return_hypotheses)
 
 
 def main():
