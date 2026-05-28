@@ -123,15 +123,27 @@ def main():
             with open(cfg_path) as f:
                 cfg_dict = yaml.safe_load(f)
             decoding = cfg_dict.get("decoding") or {}
+            patched = False
             if decoding.get("strategy") in ("greedy_batch",):
                 decoding["strategy"] = "greedy"
-                cfg_dict["decoding"] = decoding
+                patched = True
+            # Strip confidence_cfg — saved configs from newer NeMo versions
+            # contain fields the older installed NeMo doesn't accept
+            # (e.g. tdt_include_duration). We don't need confidence here.
+            if "confidence_cfg" in decoding:
+                decoding.pop("confidence_cfg")
+                patched = True
+            # Strip any TDT-specific subkeys (only used by RNNT models anyway)
+            for k in list(decoding.keys()):
+                if "tdt" in k.lower():
+                    decoding.pop(k)
+                    patched = True
+            cfg_dict["decoding"] = decoding
+            if patched:
                 fd, override = tempfile.mkstemp(suffix=".yaml")
-                os.close(fd) if False else None  # noqa
                 with open(override, "w") as f:
                     yaml.safe_dump(cfg_dict, f)
-                print(f"[bench] patched decoding.strategy greedy_batch -> greedy",
-                      flush=True)
+                print(f"[bench] patched .nemo config -> {override}", flush=True)
 
     print(f"[bench] loading model {args.model}", flush=True)
     model = EncDecCTCModel.restore_from(
