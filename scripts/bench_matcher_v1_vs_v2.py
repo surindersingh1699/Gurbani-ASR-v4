@@ -105,10 +105,38 @@ def main():
     args = ap.parse_args()
 
     import torch
+    import tarfile
+    import tempfile
+    import yaml
     from nemo.collections.asr.models import EncDecCTCModel
 
+    # Some .nemo files were saved with decoding.strategy="greedy_batch" which
+    # only newer NeMo versions accept. Pre-patch the config to "greedy" so
+    # restore_from works on older NeMo installs too.
+    override = None
+    with tarfile.open(args.model, "r") as tf:
+        cfg_name = next(
+            (n for n in tf.getnames() if n.endswith("model_config.yaml")), None)
+        if cfg_name:
+            tf.extract(cfg_name, path=tempfile.gettempdir())
+            cfg_path = f"{tempfile.gettempdir()}/{cfg_name}"
+            with open(cfg_path) as f:
+                cfg_dict = yaml.safe_load(f)
+            decoding = cfg_dict.get("decoding") or {}
+            if decoding.get("strategy") in ("greedy_batch",):
+                decoding["strategy"] = "greedy"
+                cfg_dict["decoding"] = decoding
+                fd, override = tempfile.mkstemp(suffix=".yaml")
+                os.close(fd) if False else None  # noqa
+                with open(override, "w") as f:
+                    yaml.safe_dump(cfg_dict, f)
+                print(f"[bench] patched decoding.strategy greedy_batch -> greedy",
+                      flush=True)
+
     print(f"[bench] loading model {args.model}", flush=True)
-    model = EncDecCTCModel.restore_from(args.model, map_location="cuda")
+    model = EncDecCTCModel.restore_from(
+        args.model, map_location="cuda",
+        override_config_path=override)
     model.freeze()
     if torch.cuda.is_available():
         model = model.cuda()
