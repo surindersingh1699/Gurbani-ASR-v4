@@ -140,18 +140,41 @@ class AnchorMatcherV2:
                 score += self.continuity_bonus * 0.5
         return score
 
-    def search(self, anchor: str, n_best: int = 5) -> list[Candidate]:
-        """Return top-N shabad candidates for a single anchor string."""
+    def search(self, anchor: str, n_best: int = 5,
+               prefilter_top_k: int = 200) -> list[Candidate]:
+        """Return top-N shabad candidates for a single anchor string.
+
+        Two-stage scoring:
+          1. Fast 4-gram overlap on all 141k DB rows, take top `prefilter_top_k`.
+          2. Slow composite score (overlap + edit distance + continuity) on
+             those finalists only. ~700x speedup vs naive all-rows scoring,
+             with negligible recall loss (true positives have high overlap).
+        """
         if not anchor:
             return []
         q4 = _char_4grams(anchor)
-        # Score every row, then best-per-shabad
-        best_per_shabad: dict[str, tuple[float, DBRow]] = {}
+        # Stage 1: fast 4-gram overlap pre-filter
+        scored = []
         for row in self._rows:
+            ov = _overlap(q4, row.ngrams)
+            if ov > 0:
+                scored.append((ov, row))
+        scored.sort(key=lambda x: -x[0])
+        candidates = scored[:prefilter_top_k]
+        # Stage 2: composite score on top-K
+        best_per_shabad: dict[str, tuple[float, DBRow]] = {}
+        for _, row in candidates:
             s = self._row_score(anchor, q4, row)
             cur = best_per_shabad.get(row.shabad_id)
             if cur is None or s > cur[0]:
                 best_per_shabad[row.shabad_id] = (s, row)
+        # Stage 3: always re-score the locked shabad (continuity)
+        if self.locked_shabad and self.locked_shabad not in best_per_shabad:
+            for row in self._by_shabad.get(self.locked_shabad, []):
+                s = self._row_score(anchor, q4, row)
+                cur = best_per_shabad.get(row.shabad_id)
+                if cur is None or s > cur[0]:
+                    best_per_shabad[row.shabad_id] = (s, row)
         ranked = sorted(
             ((s, sid, r) for sid, (s, r) in best_per_shabad.items()),
             reverse=True)[:n_best]
