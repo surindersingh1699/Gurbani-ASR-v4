@@ -34,6 +34,15 @@ import sys
 import time
 from pathlib import Path
 
+# v4 modules live in this same scripts/ dir.
+sys.path.insert(0, str(Path(__file__).parent))
+try:
+    import v4_harvest_db as _v4db                     # noqa: E402
+    import v4_align_check_gemini as _v4align          # noqa: E402
+except ImportError:
+    _v4db = None
+    _v4align = None
+
 
 DEFAULT_SEEDS: list[tuple[str, str]] = [
     # (channel URL, short slug used for grouping)
@@ -42,6 +51,18 @@ DEFAULT_SEEDS: list[tuple[str, str]] = [
     ("https://www.youtube.com/@GurbaniMediaCentre/videos", "GurbaniMediaCentre"),
     ("https://www.youtube.com/@NirbaanKeertan/videos", "NirbaanKeertan"),
     ("https://www.youtube.com/@sikhnet/videos", "sikhnet"),
+]
+
+
+# v4 priority seeds: high-volume channels harvested via auto-captions
+# (pa-orig). Confirmed `pa-orig` available on SGPC, AKJ, Fremont via
+# yt-dlp metadata 2026-05-28. Selected for `--seeds-v4`.
+V4_PRIORITY_SEEDS: list[tuple[str, str]] = [
+    ("https://www.youtube.com/@SGPCSriAmritsar/videos", "SGPCSriAmritsar"),
+    ("https://www.youtube.com/@akjdotorg/videos",       "akjdotorg"),
+    ("https://www.youtube.com/@gurdwarasahibfremont/videos", "gurdwarasahibfremont"),
+    ("https://www.youtube.com/@GurdwaraBanglaSahibOfficial/videos",
+     "GurdwaraBanglaSahibOfficial"),
 ]
 
 
@@ -424,8 +445,9 @@ def main() -> int:
     ap.add_argument("--target-hours", type=float, default=300.0)
     ap.add_argument("--min-video-min", type=float, default=30.0,
                     help="Skip videos shorter than this many minutes.")
-    ap.add_argument("--max-video-min", type=float, default=360.0,
-                    help="Skip videos longer than this (likely live streams).")
+    ap.add_argument("--max-video-min", type=float, default=800.0,
+                    help="Skip videos longer than this. Bumped to 800 for v4 "
+                         "so 10-13h SGPC archives are included.")
     ap.add_argument("--push-every", type=int, default=15,
                     help="Push a dataset snapshot to HF after this many videos.")
     ap.add_argument("--legacy-replace-push", action="store_true",
@@ -436,7 +458,33 @@ def main() -> int:
                     help="Seconds to sleep between successful videos "
                          "(gentle pacing to avoid YouTube rate limits).")
     ap.add_argument("--channels", default="",
-                    help="Comma-separated YouTube URLs. If empty, use DEFAULT_SEEDS.")
+                    help="Comma-separated YouTube URLs. If empty, use DEFAULT_SEEDS "
+                         "(or V4_PRIORITY_SEEDS if --seeds-v4).")
+    ap.add_argument("--seeds-v4", action="store_true",
+                    help="Use V4_PRIORITY_SEEDS (SGPC/AKJ/Fremont/Bangla Sahib) "
+                         "instead of DEFAULT_SEEDS.")
+    ap.add_argument("--db", type=Path, default=None,
+                    help="SQLite provenance DB (default: <out>/harvest.sqlite). "
+                         "Disables DB if --no-db is passed.")
+    ap.add_argument("--no-db", action="store_true",
+                    help="Disable the v4 SQLite provenance layer entirely.")
+    ap.add_argument("--align-check", action="store_true", default=True,
+                    help="Run Gemini sample-alignment check after each video "
+                         "(default on). Requires GEMINI_API_KEY in env.")
+    ap.add_argument("--no-align-check", dest="align_check", action="store_false",
+                    help="Skip Gemini alignment check.")
+    ap.add_argument("--align-samples", type=int, default=10,
+                    help="Random clips per video to verify with Gemini/HF.")
+    ap.add_argument("--align-threshold", type=float, default=0.6,
+                    help="Min fraction of matched samples to accept video.")
+    ap.add_argument("--align-backend", choices=("gemini", "hf", "auto"),
+                    default="auto",
+                    help="auto = try Gemini, fall back to HF surt-small-v3 "
+                         "if no GEMINI_API_KEY.")
+    ap.add_argument("--align-hf-model",
+                    default=_v4align.HF_FALLBACK_MODEL_ID
+                            if _v4align else "surindersinghssj/surt-small-v3",
+                    help="HF model id for the fallback aligner.")
     ap.add_argument("--pot-provider", default="http://127.0.0.1:4416")
     ap.add_argument("--cookies", type=Path, default=Path("/root/cookies.txt"))
     ap.add_argument("--chunker-script", type=Path,
@@ -461,6 +509,36 @@ def main() -> int:
         log(logfp, f"[{label}] push_additive")
         return push_additive(staging, args.repo, args.public, pushed_fp, logfp)
 
+    # v4 provenance DB (optional). Created/opened once; passed into the loop.
+    v4_conn = None
+    v4_client = None
+    if _v4db is not None and not args.no_db:
+        db_path = args.db or (out / "harvest.sqlite")
+        v4_conn = _v4db.connect(db_path)
+        log(logfp, f"v4 provenance DB: {db_path}")
+    v4_backend = "gemini"
+    if args.align_check and _v4align is not None and v4_conn is not None:
+        want_gemini = args.align_backend in ("gemini", "auto")
+        want_hf     = args.align_backend in ("hf",     "auto")
+        if want_gemini:
+            try:
+                v4_client = _v4align._init_client()
+                v4_backend = "gemini"
+                log(logfp, "v4 alignment-check: ENABLED (backend=gemini)")
+            except RuntimeError as e:
+                if want_hf:
+                    log(logfp, f"v4 Gemini unavailable ({e}); falling back to HF "
+                               f"{args.align_hf_model}")
+                    v4_backend = "hf"
+                else:
+                    log(logfp, f"v4 alignment-check disabled: {e}")
+                    v4_client = None
+                    v4_backend = None
+        elif want_hf:
+            v4_backend = "hf"
+            log(logfp, f"v4 alignment-check: ENABLED (backend=hf "
+                       f"{args.align_hf_model})")
+
     log(logfp, f"=== BULK RUN START target={args.target_hours}h "
                f"repo={args.repo} public={args.public} ===")
 
@@ -473,6 +551,8 @@ def main() -> int:
                 if url:
                     slug = url.rstrip("/").split("/")[-2] if "/" in url else url
                     seeds.append((url, slug))
+        elif args.seeds_v4:
+            seeds = V4_PRIORITY_SEEDS
         else:
             seeds = DEFAULT_SEEDS
         log(logfp, f"enumerating {len(seeds)} seeds")
@@ -548,10 +628,24 @@ def main() -> int:
                    f"({v.get('duration_s',0)/60:.0f}min, "
                    f"ch={v.get('channel_slug','?')}) {v.get('title','')[:80]!r}")
 
+        # v4: record this video in the DB at first sight so failed videos
+        # still have a row with a reason.
+        if v4_conn is not None:
+            _v4db.upsert_video(
+                v4_conn, vid,
+                channel_slug=v.get("channel_slug"),
+                channel_url=v.get("channel_url"),
+                title=v.get("title"),
+                duration_s=v.get("duration_s"),
+                status="queued",
+            )
+
         workdir = staging / vid
         status, cap_path = try_fetch_caption(vid, workdir, "pa-orig",
                                              args.pot_provider, args.cookies,
                                              logfp)
+        if v4_conn is not None:
+            _v4db.upsert_video(v4_conn, vid, caption_status=status)
 
         if status == "rate_limited":
             consecutive_rate_limits += 1
@@ -573,6 +667,9 @@ def main() -> int:
             with done_fp.open("a") as f:
                 f.write(vid + "\n")
             done.add(vid)
+            if v4_conn is not None:
+                _v4db.upsert_video(v4_conn, vid, status="rejected",
+                                   rejection_reason=f"caption_{status}")
             log(logfp, f"  skip ({status})")
             # Gentle pacing so we do not re-trigger rate limits.
             time.sleep(3)
@@ -585,6 +682,8 @@ def main() -> int:
             args.chunker_script, args.venv_python, vid, staging,
             args.pot_provider, args.cookies, logfp,
         )
+        if v4_conn is not None:
+            _v4db.upsert_video(v4_conn, vid, chunker_status=chk_status)
         if chk_status == "rate_limited":
             consecutive_rate_limits += 1
             wait_s = min(60 * 10 * consecutive_rate_limits, 3600)
@@ -602,6 +701,9 @@ def main() -> int:
             with done_fp.open("a") as f:
                 f.write(vid + "\n")
             done.add(vid)
+            if v4_conn is not None:
+                _v4db.upsert_video(v4_conn, vid, status="rejected",
+                                   rejection_reason=f"chunker_{chk_status}")
             time.sleep(10)
             continue
 
@@ -612,8 +714,35 @@ def main() -> int:
         if manifest_fp.exists():
             n_clips = sum(1 for l in manifest_fp.read_text().splitlines() if l.strip())
             log(logfp, f"  kept {n_clips} clips")
+            # v4: record all kept clips, then run Gemini sample-alignment.
+            if v4_conn is not None:
+                _v4db.record_clips_from_manifest(v4_conn, vid, manifest_fp)
+                _v4db.upsert_video(v4_conn, vid, status="chunked")
+                if v4_backend in ("gemini", "hf"):
+                    try:
+                        passed = _v4align.check_video_alignment(
+                            vid, workdir, v4_conn,
+                            n_samples=args.align_samples,
+                            threshold=args.align_threshold,
+                            client=v4_client,
+                            backend=v4_backend,
+                            hf_model_id=args.align_hf_model,
+                        )
+                        log(logfp,
+                            f"  align[{v4_backend}]: "
+                            f"{'PASS' if passed else 'REJECT'} "
+                            f"(thr={args.align_threshold})")
+                    except Exception as e:
+                        # Don't kill the harvest on aligner hiccups; just log.
+                        log(logfp, f"  align ERROR (kept video): {e!r}")
+                else:
+                    # Aligner disabled -> auto-pass.
+                    _v4db.upsert_video(v4_conn, vid, status="aligned")
         else:
             log(logfp, f"  no manifest produced")
+            if v4_conn is not None:
+                _v4db.upsert_video(v4_conn, vid, status="rejected",
+                                   rejection_reason="no_manifest")
 
         with done_fp.open("a") as f:
             f.write(vid + "\n")
@@ -622,9 +751,14 @@ def main() -> int:
 
         if processed_since_push >= args.push_every:
             log(logfp, f"snapshot push after {processed_since_push} videos")
+            pushed_before = _load_pushed(pushed_fp)
             url = _push("snapshot")
             if url:
                 log(logfp, f"  snapshot -> {url}")
+                if v4_conn is not None:
+                    new_pushed = _load_pushed(pushed_fp) - pushed_before
+                    if new_pushed:
+                        _v4db.mark_video_pushed(v4_conn, new_pushed)
             processed_since_push = 0
 
         # Gentle pacing between videos so we don't re-trigger rate limits.
@@ -632,7 +766,12 @@ def main() -> int:
 
     # Final push.
     log(logfp, f"final push; total hours = {current_hours():.1f}")
+    pushed_before = _load_pushed(pushed_fp)
     url = _push("final")
+    if url and v4_conn is not None:
+        new_pushed = _load_pushed(pushed_fp) - pushed_before
+        if new_pushed:
+            _v4db.mark_video_pushed(v4_conn, new_pushed)
     if url:
         log(logfp, f"FINAL -> {url}")
 
