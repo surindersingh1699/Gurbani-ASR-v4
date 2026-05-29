@@ -55,30 +55,35 @@ from pathlib import Path
 
 
 BRACKETED = re.compile(r"\[[^\]]*\]")
-PAREN_TAGS = re.compile(r"\(\s*(music|sangit|applause|laughter|instrumental)\s*\)", re.I)
-VERSE_MARK = re.compile(r"॥[੦-੯0-9]*॥|॥|।")
-ZW = re.compile(r"[\u200c\u200d]")
+PAREN_TAGS = re.compile(r"\([^)]*\)")
+SPEAKER_MARK = re.compile(r">>+|<<+|»+|«+")
+VERSE_MARK = re.compile(
+    "॥[੦-੯0-9]*॥|॥|।"
+)
+ZW = re.compile("[‌‍﻿]")
+NON_GURMUKHI = re.compile(r"[^\u0A00-\u0A7F\s]+")
 WS = re.compile(r"\s+")
 
 
-def strip_for_drop_check(text: str) -> str:
-    """Return text with sound-tags + verse markers removed. Empty => drop window."""
+def _gurmukhi_only(text: str) -> str:
     t = BRACKETED.sub(" ", text)
     t = PAREN_TAGS.sub(" ", t)
+    t = SPEAKER_MARK.sub(" ", t)
     t = VERSE_MARK.sub(" ", t)
     t = ZW.sub("", t)
+    t = NON_GURMUKHI.sub(" ", t)
     t = WS.sub(" ", t).strip()
     return t
+
+
+def strip_for_drop_check(text: str) -> str:
+    """Return text with non-Gurmukhi removed. Empty => drop window."""
+    return _gurmukhi_only(text)
 
 
 def normalize_kept(text: str) -> str:
-    """Normalization applied to kept clips' final `text` field."""
-    t = BRACKETED.sub(" ", text)
-    t = PAREN_TAGS.sub(" ", t)
-    t = VERSE_MARK.sub(" ", t)
-    t = ZW.sub("", t)
-    t = WS.sub(" ", t).strip()
-    return t
+    """Final text field after non-Gurmukhi filter + sound-tag strip."""
+    return _gurmukhi_only(text)
 
 
 def parse_json3(path: Path):
