@@ -25,7 +25,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 from pilot_yt_caption_chunks import parse_json3, _gurmukhi_only  # noqa: E402
 from v4_align_check_gemini import (  # noqa: E402
-    _hf_transcribe_batch, _first_n_words, HF_FALLBACK_MODEL_ID,
+    _hf_transcribe_batch, _first_letters, HF_FALLBACK_MODEL_ID,
 )
 import v4_harvest_db as db  # noqa: E402
 
@@ -147,14 +147,18 @@ def main() -> int:
     db.upsert_video(conn, args.video_id)
     matches = 0
     for (s, e, cap_text), asr_text in zip(valid_samples, asr_texts):
-        cap_w = _first_n_words(cap_text, 3)
-        asr_w = _first_n_words(asr_text, 3)
-        matched = bool(cap_w) and bool(asr_w) and (
-            cap_w == asr_w or cap_w in asr_text or asr_w in cap_text
+        cap_fl = _first_letters(cap_text, 5)
+        asr_fl = _first_letters(asr_text, 5)
+        matched = (
+            len(cap_fl) >= 3 and len(asr_fl) >= 3 and (
+                cap_fl == asr_fl
+                or cap_fl in asr_fl
+                or asr_fl in cap_fl
+            )
         )
         db.record_alignment_check(
             conn, args.video_id, float(s), float(e),
-            cap_text, asr_text, cap_w, asr_w, matched,
+            cap_text, asr_text, cap_fl, asr_fl, matched,
         )
         if matched:
             matches += 1

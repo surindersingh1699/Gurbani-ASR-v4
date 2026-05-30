@@ -54,6 +54,26 @@ def _first_n_words(text: str, n: int) -> str:
     return " ".join(cleaned.split()[:n])
 
 
+def _first_letters(text: str, n: int | None = None) -> str:
+    """First-letter-of-each-word skeleton. With Gurmukhi this is the only
+    stable signal between captions and ASR \u2014 matras and word boundaries
+    drift constantly, but the leading consonant of each word is the
+    project's "anchor first letter" metric (branch
+    feat/anchor-first-letter-v1).
+
+    Returns a string of the first chars of each word, ZW stripped.
+    If `n` is given, only the first `n` words contribute.
+    """
+    if not text:
+        return ""
+    cleaned = text.replace("\u200c", "").replace("\u200d", "")
+    cleaned = WS.sub(" ", cleaned).strip()
+    words = cleaned.split()
+    if n is not None:
+        words = words[:n]
+    return "".join(w[0] for w in words if w)
+
+
 def _looks_gurmukhi(text: str, min_chars: int = 3) -> bool:
     """Quick filter so we don't compare romanised junk."""
     chars = "".join(GURMUKHI.findall(text or ""))
@@ -257,20 +277,28 @@ def check_video_alignment(
     matches = 0
     for m, g_text in zip(valid_samples, gemini_texts):
         cap_text = m.get("text", "") or m.get("raw_text", "")
-        cap_w = _first_n_words(cap_text, 3)
-        gem_w = _first_n_words(g_text, 3)
-        # Match rule: prefixes equal, OR caller's 3-word window contained in
-        # whichever is longer (handles Gemini emitting longer phrasing).
-        matched = bool(cap_w) and bool(gem_w) and (
-            cap_w == gem_w
-            or cap_w in g_text
-            or gem_w in cap_text
+        # First-letter-of-each-word anchor (matra-insensitive). Matras drift
+        # heavily between captions and ASR; first consonant of each word is
+        # the stable signal — and matches the project's "anchor first letter"
+        # metric (branch feat/anchor-first-letter-v1).
+        cap_fl = _first_letters(cap_text, 5)
+        gem_fl = _first_letters(g_text, 5)
+        matched = (
+            len(cap_fl) >= 3 and len(gem_fl) >= 3 and (
+                cap_fl == gem_fl
+                or cap_fl in gem_fl
+                or gem_fl in cap_fl
+                # Same length, at most one substitution (ASR mis-hears one
+                # leading consonant, e.g. ਹ vs ਧ).
+                or (len(cap_fl) == len(gem_fl)
+                    and sum(a != b for a, b in zip(cap_fl, gem_fl)) <= 1)
+            )
         )
         db.record_alignment_check(
             conn, video_id,
             float(m.get("start_s", 0.0)),
             float(m.get("end_s", 0.0)),
-            cap_text, g_text, cap_w, gem_w, matched,
+            cap_text, g_text, cap_fl, gem_fl, matched,
         )
         if matched:
             matches += 1
