@@ -546,11 +546,19 @@ def main() -> int:
     if not candidates_fp.exists():
         seeds = []
         if args.channels:
+            import re as _re
             for url in args.channels.split(","):
                 url = url.strip()
-                if url:
+                if not url:
+                    continue
+                # Playlist URLs: slug = pl_<playlist_id>. Channel URLs:
+                # slug = the segment before "/videos" (or last path segment).
+                m = _re.search(r"[?&]list=([A-Za-z0-9_-]+)", url)
+                if m:
+                    slug = f"pl_{m.group(1)}"
+                else:
                     slug = url.rstrip("/").split("/")[-2] if "/" in url else url
-                    seeds.append((url, slug))
+                seeds.append((url, slug))
         elif args.seeds_v4:
             seeds = V4_PRIORITY_SEEDS
         else:
