@@ -173,6 +173,45 @@ def try_fetch_caption(video_id: str, workdir: Path, lang: str, pot: str,
     return "no_caption", None
 
 
+def run_preflight(script: Path, venv_python: Path, video_id: str,
+                  db_path: Path, n_samples: int, threshold: float,
+                  pot: str, cookies: Path | None, hf_model: str,
+                  staging_root: Path,
+                  logfp: Path) -> str:
+    """Returns "pass" | "reject" | "error".
+
+    "error" means the preflight could not decide — the caller should fall
+    through to the full chunker so we do not silently drop a usable video.
+    """
+    tmp = staging_root / f"{video_id}__preflight"
+    cmd = [
+        str(venv_python), str(script),
+        "--video-id", video_id,
+        "--db", str(db_path),
+        "--out-dir", str(tmp),
+        "--n-samples", str(n_samples),
+        "--threshold", str(threshold),
+        "--pot-provider", pot,
+        "--hf-model", hf_model,
+    ]
+    if cookies and cookies.exists():
+        cmd += ["--cookies", str(cookies)]
+    try:
+        r = run(cmd, timeout=600)
+    except subprocess.TimeoutExpired:
+        log(logfp, f"  PREFLIGHT TIMEOUT {video_id}")
+        shutil.rmtree(tmp, ignore_errors=True)
+        return "error"
+    shutil.rmtree(tmp, ignore_errors=True)
+    if r.returncode == 0:
+        return "pass"
+    if r.returncode == 1:
+        return "reject"
+    tail = ((r.stderr or "") + (r.stdout or ""))[-400:]
+    log(logfp, f"  PREFLIGHT ERROR {video_id} rc={r.returncode} tail={tail!r}")
+    return "error"
+
+
 def run_chunker(script: Path, venv_python: Path, video_id: str,
                 out_root: Path, pot: str, cookies: Path | None,
                 logfp: Path) -> tuple[str, Path]:
@@ -489,6 +528,16 @@ def main() -> int:
     ap.add_argument("--cookies", type=Path, default=Path("/root/cookies.txt"))
     ap.add_argument("--chunker-script", type=Path,
                     default=Path(__file__).parent / "pilot_yt_caption_chunks.py")
+    ap.add_argument("--preflight", dest="preflight", action="store_true",
+                    default=True,
+                    help="Run v4_preflight_align before full chunker — "
+                         "downloads only 3 small audio slices to gate the "
+                         "video. Saves ~99%% bandwidth on rejects. Default on.")
+    ap.add_argument("--no-preflight", dest="preflight", action="store_false",
+                    help="Disable preflight; full chunker runs unconditionally "
+                         "and post-chunker align decides keep/reject.")
+    ap.add_argument("--preflight-script", type=Path,
+                    default=Path(__file__).parent / "v4_preflight_align.py")
     ap.add_argument("--venv-python", type=Path, default=Path("/root/venv/bin/python"))
     args = ap.parse_args()
 
@@ -512,8 +561,8 @@ def main() -> int:
     # v4 provenance DB (optional). Created/opened once; passed into the loop.
     v4_conn = None
     v4_client = None
+    db_path = args.db or (out / "harvest.sqlite")
     if _v4db is not None and not args.no_db:
-        db_path = args.db or (out / "harvest.sqlite")
         v4_conn = _v4db.connect(db_path)
         log(logfp, f"v4 provenance DB: {db_path}")
     v4_backend = "gemini"
@@ -683,9 +732,40 @@ def main() -> int:
             time.sleep(3)
             continue
 
-        # status == "ok" -> we have the caption cached. Now run the chunker
-        # (which will download the webm and reuse the cached caption via
-        # pilot_yt_caption_chunks.py's _find_master/cap_glob short-circuit).
+        # status == "ok" -> we have the caption cached.
+        #
+        # PREFLIGHT GATE — before paying for a full audio download + slice,
+        # download just N small caption-paired snippets and align them. If
+        # the snippets do not match the captions, skip this video entirely
+        # (saves ~99% of the bandwidth + CPU for rejected videos).
+        if (args.preflight and v4_backend in ("gemini", "hf")
+                and v4_conn is not None):
+            pre = run_preflight(
+                args.preflight_script, args.venv_python, vid,
+                db_path, args.align_samples, args.align_threshold,
+                args.pot_provider, args.cookies, args.align_hf_model,
+                staging, logfp,
+            )
+            if pre == "reject":
+                with skipped_fp.open("a") as f:
+                    f.write(json.dumps(
+                        {"id": vid, "reason": "preflight_misaligned",
+                         "title": v.get("title", ""),
+                         "channel": v.get("channel_slug", "")},
+                        ensure_ascii=False) + "\n")
+                with done_fp.open("a") as f:
+                    f.write(vid + "\n")
+                done.add(vid)
+                _v4db.upsert_video(
+                    v4_conn, vid, status="rejected",
+                    rejection_reason="preflight_misaligned",
+                )
+                log(logfp, "  preflight: REJECT — skipped full download")
+                time.sleep(2)
+                continue
+            log(logfp, f"  preflight: {pre.upper()}")
+            # "pass" or "error" -> fall through to the full chunker.
+
         chk_status, workdir = run_chunker(
             args.chunker_script, args.venv_python, vid, staging,
             args.pot_provider, args.cookies, logfp,
