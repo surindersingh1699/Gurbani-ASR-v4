@@ -170,6 +170,9 @@ def classify_row(
 
 # --- Driver -------------------------------------------------------------
 
+PUSH_CHUNK = 5000  # rows per HF split — caps RAM at ~500MB-1GB per process
+
+
 def run(
     source_repo: str,
     dest_repo: str,
@@ -191,7 +194,9 @@ def run(
     )
 
     print(f"[clean_v4] streaming source {source_repo} ...", flush=True)
-    from datasets import Audio, load_dataset
+    from datasets import Audio, Dataset, load_dataset
+    from huggingface_hub import create_repo
+
     ds = load_dataset(source_repo, split="train", streaming=True)
     # datasets >= 4 needs torchcodec to decode audio; we passthrough bytes
     # (no decoding required for skeleton-only Phase 1), so disable decode.
@@ -208,25 +213,64 @@ def run(
         }
         print(f"[clean_v4] resume: skipping {len(done_videos)} done videos")
 
-    # Reset residual file if not resuming
-    if not done_videos and residual_path.exists():
-        residual_path.unlink()
+    if not dry_run:
+        try:
+            create_repo(
+                dest_repo, repo_type="dataset", private=not public,
+                exist_ok=True, token=os.environ.get("HF_TOKEN"),
+            )
+        except Exception as e:
+            print(f"[clean_v4] create_repo: {e}", flush=True)
+
+    # Append-mode for both residual and done so resume continues cleanly.
     residual_fp = residual_path.open("a", encoding="utf-8")
 
-    rows_high: list[dict] = []
-    rows_low: list[dict] = []
+    pending: list[dict] = []      # accumulated rows for next HF split
+    pending_vids: list[str] = []  # videos fully represented in pending
     histo = Counter()
     processed = 0
-    pushed_videos: set[str] = set()
     cur_video: str | None = None
     cur_video_rows: list[dict] = []
     cur_video_hits: Counter = Counter()
+    chunk_seq = 0
+    run_stamp = time.strftime("%Y%m%d_%H%M%S")
+
+    def push_pending(force: bool = False):
+        nonlocal chunk_seq
+        if dry_run:
+            return
+        if not pending:
+            return
+        if not force and len(pending) < PUSH_CHUNK:
+            return
+        n = len(pending)
+        print(
+            f"[clean_v4] pushing chunk #{chunk_seq} ({n} rows) -> {dest_repo}",
+            flush=True,
+        )
+        ds_out = Dataset.from_list(pending)
+        if "audio" in ds_out.column_names:
+            try:
+                ds_out = ds_out.cast_column("audio", Audio(sampling_rate=16000))
+            except Exception as e:
+                print(f"[clean_v4] cast audio failed: {e}", flush=True)
+        split_name = f"clean_phase1_{run_stamp}_part{chunk_seq:04d}"
+        ds_out.push_to_hub(
+            dest_repo, split=split_name, private=not public,
+            token=os.environ.get("HF_TOKEN"),
+        )
+        # Only after push succeeds, mark these videos done.
+        with done_path.open("a") as fp:
+            for v in pending_vids:
+                fp.write(v + "\n")
+        print(f"[clean_v4] pushed {split_name}, marked {len(pending_vids)} videos done", flush=True)
+        pending.clear()
+        pending_vids.clear()
+        chunk_seq += 1
 
     def flush_video(buf_rows, vid):
         if not buf_rows:
             return
-        # Group + classify all rows of this video sequentially so retrieval
-        # context for residual rows uses the video's running shabad hits.
         for i, r in enumerate(buf_rows):
             quality, route = classify_row(r, idx)
             histo[(quality, route)] += 1
@@ -234,18 +278,16 @@ def run(
                 "audio": r.get("audio"),
                 "original_text": r.get("text"),
                 "text": r.get("text"),
-                "quality": "high",
+                "quality": "high" if quality == "high" else "residual",
                 "video_id": r.get("video_id"),
                 "start_s": r.get("start_s"),
                 "end_s": r.get("end_s"),
                 "duration_s": r.get("duration_s"),
                 "channel": r.get("channel"),
+                "clip_id": r.get("clip_id"),
                 "skel_route": route,
             }
-            if quality == "high":
-                rows_high.append(base)
-            else:
-                # Compute retrieval context for Phase 2
+            if quality != "high":
                 cur_tokens = tokenize(r["text"])
                 prev_t = tokenize(buf_rows[i - 1]["text"]) if i > 0 else []
                 next_t = (
@@ -263,7 +305,6 @@ def run(
                 )
                 if sid:
                     cur_video_hits[sid] += 1
-                # Write to residual JSONL for Phase 2
                 residual_fp.write(json.dumps({
                     "clip_id": r.get("clip_id"),
                     "video_id": vid,
@@ -272,15 +313,12 @@ def run(
                     "shabad_pangtis": pangtis,
                     "start_s": r.get("start_s"),
                     "duration_s": r.get("duration_s"),
-                    "audio_ref": "passthrough",  # actual audio bytes restored at Phase 2 push
+                    "audio_ref": "passthrough",
                 }, ensure_ascii=False) + "\n")
-                # For now, set text=original + quality=residual; Phase 2 may overwrite
-                base["quality"] = "residual"
-                rows_low.append(base)
-        # Mark video done
-        with done_path.open("a") as fp:
-            fp.write(vid + "\n")
-        pushed_videos.add(vid)
+            pending.append(base)
+        residual_fp.flush()
+        pending_vids.append(vid)
+        push_pending()
 
     print(f"[clean_v4] iterating clips ...", flush=True)
     t1 = time.time()
@@ -308,7 +346,7 @@ def run(
             rate = processed / (time.time() - t1)
             print(
                 f"[clean_v4] processed {processed} clips "
-                f"({rate:.0f}/s), histo={dict(histo)}",
+                f"({rate:.0f}/s), histo={dict(histo)}, pending={len(pending)}",
                 flush=True,
             )
         if limit and processed >= limit:
@@ -316,6 +354,7 @@ def run(
 
     if cur_video_rows:
         flush_video(cur_video_rows, cur_video)
+    push_pending(force=True)
     residual_fp.close()
 
     elapsed = time.time() - t1
@@ -324,37 +363,7 @@ def run(
     for k, v in sorted(histo.items(), key=lambda kv: -kv[1]):
         print(f"    {k}: {v}")
     print(f"[clean_v4] residual rows written to: {residual_path}")
-    print(f"[clean_v4] high-quality rows ready: {len(rows_high)}")
-    print(f"[clean_v4] residual placeholder rows: {len(rows_low)}")
-
-    if dry_run:
-        print("[clean_v4] dry-run: skipping HF push")
-        return
-
-    # Push high-quality + residual placeholder rows to <dest_repo>
-    from datasets import Dataset, Audio
-    from huggingface_hub import HfApi, create_repo
-
-    all_rows = rows_high + rows_low
-    if not all_rows:
-        print("[clean_v4] nothing to push")
-        return
-    print(f"[clean_v4] pushing {len(all_rows)} rows to {dest_repo} (public={public})")
-    try:
-        create_repo(dest_repo, repo_type="dataset", private=not public,
-                    exist_ok=True, token=os.environ.get("HF_TOKEN"))
-    except Exception as e:
-        print(f"[clean_v4] create_repo: {e}")
-    ds_out = Dataset.from_list(all_rows)
-    if "audio" in ds_out.column_names:
-        try:
-            ds_out = ds_out.cast_column("audio", Audio(sampling_rate=16000))
-        except Exception as e:
-            print(f"[clean_v4] cast audio failed (continuing): {e}")
-    split_name = f"clean_phase1_{time.strftime('%Y%m%d_%H%M%S')}"
-    ds_out.push_to_hub(dest_repo, split=split_name, private=not public,
-                       token=os.environ.get("HF_TOKEN"))
-    print(f"[clean_v4] pushed split={split_name}")
+    print(f"[clean_v4] HF splits pushed: {chunk_seq}")
 
 
 def main():
