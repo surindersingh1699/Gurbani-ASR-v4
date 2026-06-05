@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import gc
 import json
 import os
 import sys
@@ -172,7 +173,7 @@ def classify_row(
 
 # --- Driver -------------------------------------------------------------
 
-PUSH_CHUNK = 2500  # rows per HF split — caps per-push RAM peak ~3-5GB
+PUSH_CHUNK = 1500  # smaller chunks since HF datasets accumulates refs
 PUSH_LOCK_PATH = "/tmp/clean_v4_push.lock"  # serialize HF pushes across jobs
 
 
@@ -312,6 +313,7 @@ def run(
         pending.clear()
         pending_vids.clear()
         chunk_seq += 1
+        gc.collect()
 
     def flush_video(buf_rows, vid):
         if not buf_rows:
