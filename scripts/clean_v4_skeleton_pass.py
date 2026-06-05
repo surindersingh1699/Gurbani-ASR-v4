@@ -22,11 +22,13 @@ JSONL on disk.
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import os
 import sys
 import time
 from collections import Counter
+from contextlib import contextmanager
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -170,7 +172,29 @@ def classify_row(
 
 # --- Driver -------------------------------------------------------------
 
-PUSH_CHUNK = 5000  # rows per HF split — caps RAM at ~500MB-1GB per process
+PUSH_CHUNK = 2500  # rows per HF split — caps per-push RAM peak ~3-5GB
+PUSH_LOCK_PATH = "/tmp/clean_v4_push.lock"  # serialize HF pushes across jobs
+
+
+@contextmanager
+def hf_push_lock(path: str = PUSH_LOCK_PATH):
+    """Global flock so only ONE Phase 1 job pushes to HF at a time.
+
+    The push step (Dataset.from_list → push_to_hub on 2500 audio rows)
+    spikes RAM to 3-5GB. Three concurrent pushes blew through the 16GB
+    Hetzner box on the first attempt. Holding this lock around the push
+    serializes the spike while letting all jobs scan in parallel.
+    """
+    fp = open(path, "w")
+    try:
+        fcntl.flock(fp.fileno(), fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(fp.fileno(), fcntl.LOCK_UN)
+        except Exception:
+            pass
+        fp.close()
 
 
 def run(
@@ -244,26 +268,35 @@ def run(
         if not force and len(pending) < PUSH_CHUNK:
             return
         n = len(pending)
+        split_name = f"clean_phase1_{run_stamp}_part{chunk_seq:04d}"
         print(
-            f"[clean_v4] pushing chunk #{chunk_seq} ({n} rows) -> {dest_repo}",
+            f"[clean_v4] waiting for push lock ({n} rows -> {split_name}) ...",
             flush=True,
         )
-        ds_out = Dataset.from_list(pending)
-        if "audio" in ds_out.column_names:
-            try:
-                ds_out = ds_out.cast_column("audio", Audio(sampling_rate=16000))
-            except Exception as e:
-                print(f"[clean_v4] cast audio failed: {e}", flush=True)
-        split_name = f"clean_phase1_{run_stamp}_part{chunk_seq:04d}"
-        ds_out.push_to_hub(
-            dest_repo, split=split_name, private=not public,
-            token=os.environ.get("HF_TOKEN"),
-        )
-        # Only after push succeeds, mark these videos done.
-        with done_path.open("a") as fp:
-            for v in pending_vids:
-                fp.write(v + "\n")
-        print(f"[clean_v4] pushed {split_name}, marked {len(pending_vids)} videos done", flush=True)
+        with hf_push_lock():
+            print(
+                f"[clean_v4] pushing {split_name} ({n} rows) -> {dest_repo}",
+                flush=True,
+            )
+            ds_out = Dataset.from_list(pending)
+            if "audio" in ds_out.column_names:
+                try:
+                    ds_out = ds_out.cast_column("audio", Audio(sampling_rate=16000))
+                except Exception as e:
+                    print(f"[clean_v4] cast audio failed: {e}", flush=True)
+            ds_out.push_to_hub(
+                dest_repo, split=split_name, private=not public,
+                token=os.environ.get("HF_TOKEN"),
+            )
+            # Only after push succeeds, mark these videos done.
+            with done_path.open("a") as fp:
+                for v in pending_vids:
+                    fp.write(v + "\n")
+            print(
+                f"[clean_v4] pushed {split_name}, marked {len(pending_vids)} videos done",
+                flush=True,
+            )
+            del ds_out  # release Arrow table memory before lock release
         pending.clear()
         pending_vids.clear()
         chunk_seq += 1
