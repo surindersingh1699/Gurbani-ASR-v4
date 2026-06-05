@@ -191,8 +191,15 @@ def run(
     )
 
     print(f"[clean_v4] streaming source {source_repo} ...", flush=True)
-    from datasets import load_dataset
+    from datasets import Audio, load_dataset
     ds = load_dataset(source_repo, split="train", streaming=True)
+    # datasets >= 4 needs torchcodec to decode audio; we passthrough bytes
+    # (no decoding required for skeleton-only Phase 1), so disable decode.
+    if "audio" in (ds.features or {}):
+        try:
+            ds = ds.cast_column("audio", Audio(decode=False))
+        except Exception as e:
+            print(f"[clean_v4] cast audio decode=False failed: {e}", flush=True)
 
     done_videos = set()
     if done_path.exists():

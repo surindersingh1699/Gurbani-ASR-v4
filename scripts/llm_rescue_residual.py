@@ -246,6 +246,11 @@ def run(
     from datasets import Audio, Dataset, load_dataset
 
     src = load_dataset(source_repo, split="train", streaming=True)
+    if "audio" in (src.features or {}):
+        try:
+            src = src.cast_column("audio", Audio(decode=False))
+        except Exception as e:
+            print(f"[rescue] cast audio decode=False failed: {e}", flush=True)
     rows_out: list[dict] = []
     seen = 0
     for row in src:
