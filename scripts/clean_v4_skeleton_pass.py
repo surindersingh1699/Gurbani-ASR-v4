@@ -218,8 +218,25 @@ def run(
     )
 
     print(f"[clean_v4] streaming source {source_repo} ...", flush=True)
-    from datasets import Audio, Dataset, load_dataset
+    from datasets import Audio, Dataset, Features, Value, load_dataset
     from huggingface_hub import create_repo
+
+    # Explicit Features so type inference can't flap between chunks (e.g.
+    # an all-null `channel` chunk inferring Value('null') and breaking the
+    # next push's schema check against earlier string-typed splits).
+    OUTPUT_FEATURES = Features({
+        "audio": Audio(sampling_rate=16000),
+        "text": Value("string"),
+        "original_text": Value("string"),
+        "quality": Value("string"),
+        "video_id": Value("string"),
+        "start_s": Value("float64"),
+        "end_s": Value("float64"),
+        "duration_s": Value("float64"),
+        "channel": Value("string"),
+        "clip_id": Value("string"),
+        "skel_route": Value("string"),
+    })
 
     ds = load_dataset(source_repo, split="train", streaming=True)
     # datasets >= 4 needs torchcodec to decode audio; we passthrough bytes
@@ -278,12 +295,7 @@ def run(
                 f"[clean_v4] pushing {split_name} ({n} rows) -> {dest_repo}",
                 flush=True,
             )
-            ds_out = Dataset.from_list(pending)
-            if "audio" in ds_out.column_names:
-                try:
-                    ds_out = ds_out.cast_column("audio", Audio(sampling_rate=16000))
-                except Exception as e:
-                    print(f"[clean_v4] cast audio failed: {e}", flush=True)
+            ds_out = Dataset.from_list(pending, features=OUTPUT_FEATURES)
             ds_out.push_to_hub(
                 dest_repo, split=split_name, private=not public,
                 token=os.environ.get("HF_TOKEN"),
