@@ -297,10 +297,25 @@ def run(
                 flush=True,
             )
             ds_out = Dataset.from_list(pending, features=OUTPUT_FEATURES)
-            ds_out.push_to_hub(
-                dest_repo, split=split_name, private=not public,
-                token=os.environ.get("HF_TOKEN"),
-            )
+            last_err = None
+            for attempt in range(6):
+                try:
+                    ds_out.push_to_hub(
+                        dest_repo, split=split_name, private=not public,
+                        token=os.environ.get("HF_TOKEN"),
+                    )
+                    last_err = None
+                    break
+                except Exception as e:
+                    last_err = e
+                    wait = min(10 * (2 ** attempt), 300)
+                    print(
+                        f"[clean_v4] push attempt {attempt+1}/6 failed: {type(e).__name__}: {str(e)[:200]}; retrying in {wait}s",
+                        flush=True,
+                    )
+                    time.sleep(wait)
+            if last_err is not None:
+                raise last_err
             # Only after push succeeds, mark these videos done.
             with done_path.open("a") as fp:
                 for v in pending_vids:
