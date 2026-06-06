@@ -174,6 +174,7 @@ def classify_row(
 # --- Driver -------------------------------------------------------------
 
 PUSH_CHUNK = 1500  # smaller chunks since HF datasets accumulates refs
+MAX_VIDEO_BUFFER = 800  # cap cur_video_rows to bound RAM for huge videos
 PUSH_LOCK_PATH = "/tmp/clean_v4_push.lock"  # serialize HF pushes across jobs
 
 
@@ -330,7 +331,7 @@ def run(
         chunk_seq += 1
         gc.collect()
 
-    def flush_video(buf_rows, vid):
+    def flush_video(buf_rows, vid, finalize=True):
         if not buf_rows:
             return
         for i, r in enumerate(buf_rows):
@@ -379,7 +380,8 @@ def run(
                 }, ensure_ascii=False) + "\n")
             pending.append(base)
         residual_fp.flush()
-        pending_vids.append(vid)
+        if finalize:
+            pending_vids.append(vid)
         push_pending()
 
     print(f"[clean_v4] iterating clips ...", flush=True)
@@ -404,6 +406,14 @@ def run(
             cur_video_hits = Counter()
         cur_video_rows.append(row)
         processed += 1
+        # Partial flush for huge videos so RAM stays bounded. We DON'T
+        # mark the video done here — only when the video boundary is
+        # crossed (finalize=True path). Boundary rows lose a sliver of
+        # prev/next-token context for residual retrieval; acceptable.
+        if len(cur_video_rows) >= MAX_VIDEO_BUFFER:
+            flush_video(cur_video_rows, cur_video, finalize=False)
+            cur_video_rows = []
+            gc.collect()
         if processed % 5000 == 0:
             rate = processed / (time.time() - t1)
             print(
