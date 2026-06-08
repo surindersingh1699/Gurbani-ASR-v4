@@ -1,0 +1,17 @@
+{
+  "train_total_video_ids": 1145,
+  "eval_datasets": {
+    "kirtan_eval": {
+      "n_videos": 1,
+      "n_leaked": 0,
+      "leaked_video_ids": [],
+      "safe": true
+    },
+    "sehaj_eval": {
+      "n_videos": 2,
+      "n_leaked": 0,
+      "leaked_video_ids": [],
+      "safe": true
+    }
+  }
+}

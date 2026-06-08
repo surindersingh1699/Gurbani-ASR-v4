@@ -27,39 +27,69 @@ model:
 
   # ---- training data ----
   train_ds:
-    manifest_filepath: /workspace/data/manifests/train.jsonl  # built by scripts/build_train_manifest.py
+    manifest_filepath: /workspace/data/manifests/train.jsonl
     sample_rate: 16000
-    batch_size: 64                # MICRO batch per GPU step
+    batch_size: 32                # OOM-safe; CPU-bound at 87% util so bigger batch wouldn't help
     shuffle: true
-    num_workers: 8                # A40 host typically has 16 vCPU; 8 audio workers leaves headroom
+    num_workers: 12               # was 16 — 9 vCPU pod + 12+4 workers stops thrashing
     pin_memory: true
+    persistent_workers: true      # don't respawn workers between epochs
+    prefetch_factor: 4            # was default 2 — keep GPU fed
     use_start_end_token: false
-    trim_silence: false           # we keep silent tails — model needs to learn "no speech → blank"
-    max_duration: 22.0            # hard cap; v3 corpus uses 20s clips
+    trim_silence: false
+    max_duration: 18.0            # cuts attention memory vs 22s
     min_duration: 0.5
-    bucketing_strategy: "fully_randomized"
+    bucketing_strategy: "synced_randomized"   # was fully_randomized — group similar-length clips, kills mem spikes
     bucketing_batch_size: null
-    is_tarred: false              # if you tar the data later, flip this + use the LhotseDataModule path
+    is_tarred: false
+    return_language_id: true      # AI4Bharat aggregate tokenizer needs lang per sample
+
+    # ---- HARD on-the-fly waveform augmentation (speed + pitch + noise + RIR) ----
+    # speed/gain/white_noise are self-contained (no external data). The runner
+    # appends `noise:` (MUSAN) + `impulse:` (RIRS_NOISES) blocks here AFTER it
+    # builds those manifests, so this base config never references missing files.
+    augmentor:
+      speed:                       # resample-based speed+pitch shift — NeMo's native pitch proxy
+        prob: 0.6
+        sr: 16000
+        resample_type: 'kaiser_best'
+        min_speed_rate: 0.9
+        max_speed_rate: 1.1
+        num_rates: 5
+      gain:
+        prob: 0.3
+        min_gain_dbfs: -10.0
+        max_gain_dbfs: 10.0
+      white_noise:
+        prob: 0.3
+        min_level: -90
+        max_level: -46
 
   validation_ds:
     manifest_filepath: /workspace/data/manifests/val_kirtan.jsonl
     sample_rate: 16000
-    batch_size: 32                # smaller — eval doesn't need grad-accum, just clear memory
+    batch_size: 32
     shuffle: false
-    num_workers: 4
+    num_workers: 4                # was 8
+    pin_memory: true
+    persistent_workers: true
+    return_language_id: true
 
   test_ds:
     manifest_filepath: /workspace/data/manifests/val_sehajpath.jsonl
     sample_rate: 16000
     batch_size: 32
     shuffle: false
-    num_workers: 4
+    num_workers: 4                # was 8
+    pin_memory: true
+    persistent_workers: true
+    return_language_id: true
 
-  # ---- SpecAugment — kept moderate; aggressive masking hurts simran ----
+  # ---- SpecAugment — HARD (user: augment hard). Up from freq2/time5 ----
   spec_augment:
     _target_: nemo.collections.asr.modules.SpectrogramAugmentation
-    freq_masks: 2
-    time_masks: 5            # NeMo default 10 — halved because simran has long token-repeat patterns we don't want randomly cut
+    freq_masks: 3            # hard (was 2)
+    time_masks: 10           # hard — NeMo default (was 5)
     freq_width: 27
     time_width: 0.05         # fraction of seq length
 
@@ -78,29 +108,30 @@ trainer:
   devices: 1
   accelerator: gpu
   num_nodes: 1
-  max_epochs: 8                  # 600h corpus / 256 effective batch / ~20s/clip ≈ ~430 steps/epoch · 8 epochs = ~3.5k steps
-                                 # we use max_steps below as the real cap; epochs is just a fallback
-  max_steps: 35000               # ≈ 7-8 epochs over 600h post-leak-removal
-  accumulate_grad_batches: 4     # effective batch = 64 micro × 4 accum = 256
+  max_epochs: 12                 # fallback only; max_steps is the real cap
+                                 # v4-clean pool ≈868h unique / ~1420h effective (kirtan x2 + bani)
+  max_steps: 50000               # bigger corpus + hard aug → more room; early-stop (patience 4) cuts it
+  accumulate_grad_batches: 2     # effective batch = 128 micro × 2 accum = 256
   gradient_clip_val: 1.0
-  precision: bf16-mixed          # A40 supports bf16 natively, no scaler needed
+  precision: bf16-mixed
   log_every_n_steps: 50
-  val_check_interval: 2000       # eval every 2000 steps on KIRTAN val set
-  check_val_every_n_epoch: null
+  val_check_interval: 2000
+  check_val_every_n_epoch: 1     # NeMo can't handle null
   num_sanity_val_steps: 2
   sync_batchnorm: false
-  enable_checkpointing: false    # we use NeMo's exp_manager for checkpoints
-  benchmark: true                # cudnn benchmark — speed up fixed-shape ops
+  enable_checkpointing: false
+  benchmark: true
+  logger: false                  # exp_manager creates its own; pl trainer's auto-logger collides
 
 exp_manager:
   exp_dir: /workspace/checkpoints/indicconformer-pa-v3-kirtan
   name: indicconformer-pa-v3-kirtan
   create_tensorboard_logger: true
-  create_wandb_logger: true
+  create_wandb_logger: false                 # wandb plan expired
   wandb_logger_kwargs:
     project: surt-indicconformer
     name: indicconformer-pa-v3-kirtan
-    entity: sabysurinder-surinder        # matches WANDB_ENTITY in project memory
+    entity: sabysurinder-surinder
   resume_if_exists: true
   resume_ignore_no_checkpoint: true
 
