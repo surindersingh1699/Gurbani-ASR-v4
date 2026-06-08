@@ -26,6 +26,31 @@ def is_val_video(video_id: str) -> bool:
     return h % VAL_HOLDOUT_MOD == 0
 
 
+def subsample_to_hours(entries, target_h):
+    """Cap a source to ~target_h by keeping an EVEN portion of each video's
+    clips (not all) — every video stays represented, clips evenly spaced across
+    its timeline, so voice/raga/recording diversity is preserved while hours drop.
+    entries: list of (wav, dur, text, vid). Returns the kept subset."""
+    from collections import defaultdict
+    total_h = sum(e[1] for e in entries) / 3600.0
+    if total_h <= target_h or total_h == 0:
+        return entries
+    frac = target_h / total_h
+    by_vid = defaultdict(list)
+    for e in entries:
+        by_vid[e[3]].append(e)
+    kept = []
+    for vid, clips in by_vid.items():
+        # Bresenham-style even pick: keep clip i iff floor((i+1)*frac) > floor(i*frac)
+        for i, e in enumerate(clips):
+            if int((i + 1) * frac) > int(i * frac):
+                kept.append(e)
+    kept_h = sum(e[1] for e in kept) / 3600.0
+    print(f"  [subsample] {len(entries)}→{len(kept)} clips, {total_h:.1f}h→{kept_h:.1f}h "
+          f"(target {target_h}h, frac {frac:.3f}, {len(by_vid)} videos)", flush=True)
+    return kept
+
+
 def normalize_gurbani_text(text: str) -> str:
     text = re.sub(r'॥[੦-੯]+॥', '', text)
     text = re.sub(r'॥', '', text)
@@ -166,12 +191,15 @@ def main() -> int:
     # verbatim from the 3 cleanv2 sources (×2 to stay dominant); bani-v4 = FULL
     # pass-through (text is clean continuous gurbani, quality gate would wrongly
     # drop 83% of valid Sukhmani-style spans). Text column is `text` on cleanv2.
-    #   (repo, text_col, subdir, repeats, quality_filter)
+    # bani is capped to ~50h via even per-video subsample (keep a PORTION of each
+    # video's clips, not all) so all 174 bani videos stay represented but bani is a
+    # light clean regularizer, not 318h. kirtan = no cap (target_hours=None).
+    #   (repo, text_col, subdir, repeats, quality_filter, target_hours)
     sources = [
-        ("surindersinghssj/gurbani-kirtan-yt-captions-300h-cleanv2", "text", "kirtan_300h",  2, "high"),
-        ("surindersinghssj/gurbani-kirtan-v4-sgpc-cleanv2",          "text", "kirtan_sgpc",  2, "high"),
-        ("surindersinghssj/gurbani-kirtan-v4-1000h-cleanv2",         "text", "kirtan_1000h", 2, "high"),
-        ("surindersinghssj/gurbani-bani-v4-cleanv2",                 "text", "bani_v4",      1, None),
+        ("surindersinghssj/gurbani-kirtan-yt-captions-300h-cleanv2", "text", "kirtan_300h",  2, "high", None),
+        ("surindersinghssj/gurbani-kirtan-v4-sgpc-cleanv2",          "text", "kirtan_sgpc",  2, "high", None),
+        ("surindersinghssj/gurbani-kirtan-v4-1000h-cleanv2",         "text", "kirtan_1000h", 2, "high", None),
+        ("surindersinghssj/gurbani-bani-v4-cleanv2",                 "text", "bani_v4",      1, None,   50),
     ]
 
     def jline(wav, dur, text):
@@ -187,9 +215,11 @@ def main() -> int:
     heldout_path = manifests_dir / "val_kirtan.jsonl"   # PRIMARY val = diverse held-out kirtan
     n_total = n_val = 0
     with train_path.open("w", encoding="utf-8") as f, heldout_path.open("w", encoding="utf-8") as fv:
-        for hf_id, text_col, subdir, repeats, quality_filter in sources:
+        for hf_id, text_col, subdir, repeats, quality_filter, target_hours in sources:
             entries = materialize_parallel(hf_id, audio_root / subdir, leaked, text_col,
                                            args.workers, quality_filter=quality_filter)
+            if target_hours:
+                entries = subsample_to_hours(entries, target_hours)
             is_kirtan = quality_filter == "high"   # kirtan sources only; bani has quality_filter=None
             tr = vl = 0
             for wav, dur, text, vid in entries:
