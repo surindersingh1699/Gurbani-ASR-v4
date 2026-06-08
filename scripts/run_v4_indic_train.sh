@@ -36,6 +36,19 @@ pip install -U -q "huggingface_hub>=0.34,<1.0" hf_transfer
 huggingface-cli login --token "$HF_TOKEN" --add-to-git-credential || true
 [[ -n "${WANDB_API_KEY:-}" ]] && pip install -U -q wandb && wandb login "$WANDB_API_KEY" || true
 
+# Always push logs to runlogs on exit (esp. on early failure) so we can diagnose.
+RUNLOGS=surindersinghssj/indicconformer-pa-v3-kirtan-runlogs
+huggingface-cli repo create "$(basename $RUNLOGS)" --type dataset -y 2>/dev/null || true
+push_logs_on_exit() {
+    local code=$?
+    echo "[trap] exit $code — pushing logs to $RUNLOGS"
+    for lf in log.txt train_log.txt; do
+        [ -f "$RUN_DIR/$lf" ] && huggingface-cli upload --repo-type dataset "$RUNLOGS" \
+            "$RUN_DIR/$lf" "runs/$RUN_TS/$lf" --create-pr=false 2>/dev/null || true
+    done
+}
+trap push_logs_on_exit EXIT
+
 if [ ! -d /workspace/ai4bharat-nemo ]; then
     git clone --depth 1 -b nemo-v2 https://github.com/AI4Bharat/NeMo.git /workspace/ai4bharat-nemo
     sed -i '/^triton$/d' /workspace/ai4bharat-nemo/requirements/requirements.txt
