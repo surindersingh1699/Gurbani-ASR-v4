@@ -77,13 +77,14 @@ def passes_simran_filter(text: str) -> bool:
 
 def _worker_decode_shard(args):
     """Decode one shard of the dataset. Runs in a child process."""
-    name, text_col, audio_outdir, leaked, shard_idx, num_shards, quality_filter = args
+    name, text_col, audio_outdir, leaked, shard_idx, num_shards, quality_filter, limit = args
     import soundfile as sf
     from datasets import load_dataset, Audio
     audio_outdir = Path(audio_outdir)
     audio_outdir.mkdir(parents=True, exist_ok=True)
 
-    ds = load_dataset(name, split="train")
+    split = f"train[:{limit}]" if limit else "train"   # smoke: only first shard(s)
+    ds = load_dataset(name, split=split)
     ds = ds.cast_column("audio", Audio(sampling_rate=16000))
     n = len(ds)
     # Slice this shard
@@ -125,17 +126,17 @@ def _worker_decode_shard(args):
 
 def materialize_parallel(name: str, audio_outdir: Path, leaked: set[str],
                           text_col: str, num_workers: int,
-                          quality_filter: str | None = None):
+                          quality_filter: str | None = None, limit: int = 0):
     """Decode the whole dataset in parallel, return list of manifest entries."""
     from datasets import load_dataset
-    print(f"[{name}] sizing dataset (quality_filter={quality_filter}) ...", flush=True)
-    ds = load_dataset(name, split="train")
+    print(f"[{name}] sizing dataset (quality_filter={quality_filter} limit={limit}) ...", flush=True)
+    ds = load_dataset(name, split=f"train[:{limit}]" if limit else "train")
     n = len(ds)
     print(f"[{name}] {n} rows; sharding across {num_workers} workers", flush=True)
     del ds  # free metadata before forking
 
     args_list = [
-        (name, text_col, str(audio_outdir), leaked, i, num_workers, quality_filter)
+        (name, text_col, str(audio_outdir), leaked, i, num_workers, quality_filter, limit)
         for i in range(num_workers)
     ]
     all_entries = []
@@ -175,6 +176,8 @@ def main() -> int:
     ap.add_argument("--audio-root", default="/workspace/data/audio")
     ap.add_argument("--leaked-file", default="/workspace/runs/latest/train_dropped_video_ids.txt")
     ap.add_argument("--workers", type=int, default=max(1, (os.cpu_count() or 4) - 1))
+    ap.add_argument("--limit", type=int, default=0,
+                    help="SMOKE: decode only first N rows per source (train[:N]); 0 = full")
     args = ap.parse_args()
 
     leaked: set[str] = set()
@@ -217,7 +220,8 @@ def main() -> int:
     with train_path.open("w", encoding="utf-8") as f, heldout_path.open("w", encoding="utf-8") as fv:
         for hf_id, text_col, subdir, repeats, quality_filter, target_hours in sources:
             entries = materialize_parallel(hf_id, audio_root / subdir, leaked, text_col,
-                                           args.workers, quality_filter=quality_filter)
+                                           args.workers, quality_filter=quality_filter,
+                                           limit=args.limit)
             if target_hours:
                 entries = subsample_to_hours(entries, target_hours)
             is_kirtan = quality_filter == "high"   # kirtan sources only; bani has quality_filter=None
@@ -245,7 +249,8 @@ def main() -> int:
         out_path = manifests_dir / out_name
         with out_path.open("w", encoding="utf-8") as f:
             entries = materialize_parallel(hf_id, audio_root / subdir, leaked=set(),
-                                           text_col="final_text", num_workers=args.workers)
+                                           text_col="final_text", num_workers=args.workers,
+                                           limit=args.limit)
             for wav, dur, text, vid in entries:
                 f.write(jline(wav, dur, text))
         print(f"[eval] {out_path}", flush=True)

@@ -27,6 +27,8 @@ RUN_DIR="/workspace/runs/$RUN_TS"; mkdir -p "$RUN_DIR"
 exec > >(tee -a "$RUN_DIR/log.txt") 2>&1
 echo "[run] log -> $RUN_DIR/log.txt"
 BRANCH="${REPO_BRANCH:-feat/anchor-first-letter-v1}"
+SMOKE="${SMOKE:-0}"   # SMOKE=1 -> tiny slice, ~200 steps, no model push (validate chain ~$1)
+[ "$SMOKE" = "1" ] && echo "*** SMOKE MODE: validating chain, not a real model ***"
 
 # ----- 1. install -----
 apt-get update -qq && apt-get install -y -qq git ffmpeg sox libsndfile1 jq unzip wget
@@ -91,20 +93,24 @@ fi
 
 # ----- 5. build manifests (decode cleanv2 parquet -> FLAC; kirtan HIGH-only, bani FULL) -----
 mkdir -p /workspace/data/manifests
+LIMIT_ARG=""; [ "$SMOKE" = "1" ] && LIMIT_ARG="--limit 600"
 python "$REPO_DIR/scripts/build_indicconformer_manifests_parallel.py" \
     --data-root /workspace/data \
     --audio-root /workspace/data/audio \
     --leaked-file "$RUN_DIR/train_dropped_video_ids.txt" \
-    --workers "$(($(nproc)-1))"
-for m in train.jsonl val_kirtan.jsonl; do
+    --workers "$(($(nproc)-1))" $LIMIT_ARG
+MIN_TRAIN=1000; [ "$SMOKE" = "1" ] && MIN_TRAIN=100
+for m in train.jsonl val_kirtan_caption.jsonl; do
     n=$(wc -l < /workspace/data/manifests/$m 2>/dev/null || echo 0)
     echo "[manifest] $m -> $n entries"
-    [ "$m" = "train.jsonl" ] && [ "$n" -lt 1000 ] && { echo "[FATAL] train manifest too small"; exit 2; }
+    [ "$m" = "train.jsonl" ] && [ "$n" -lt "$MIN_TRAIN" ] && { echo "[FATAL] train manifest too small"; exit 2; }
 done
 
 # ----- 6. HARD aug data: RIRS_NOISES gives both RIR + pointsource noise -----
 AUG=/workspace/data/aug; mkdir -p "$AUG"
-if [ ! -f "$AUG/rir.json" ]; then
+if [ "$SMOKE" = "1" ]; then
+    echo "[aug] SMOKE: skipping RIRS_NOISES download (speed/gain/white_noise only)"
+elif [ ! -f "$AUG/rir.json" ]; then
     echo "=== fetch RIRS_NOISES (OpenSLR SLR28) for RIR + noise aug ==="
     if wget -q -O "$AUG/rirs.zip" https://www.openslr.org/resources/28/rirs_noises.zip; then
         unzip -q -o "$AUG/rirs.zip" -d "$AUG" && rm -f "$AUG/rirs.zip"
@@ -132,21 +138,30 @@ fi
 
 # ----- 7. assemble config: exp_dir, base ckpt, inject RIR+noise augmentor if present -----
 cp "$REPO_DIR/training/indicconformer_pa_v3_kirtan.yaml" "$RUN_DIR/config.yaml"
-python - "$RUN_DIR/config.yaml" "$NEMO_PATH" "$RUN_DIR/checkpoints" "$AUG" <<'EOF'
+python - "$RUN_DIR/config.yaml" "$NEMO_PATH" "$RUN_DIR/checkpoints" "$AUG" "$SMOKE" <<'EOF'
 import sys, os
 from omegaconf import OmegaConf
-cfg_path, nemo, expdir, aug = sys.argv[1:5]
+cfg_path, nemo, expdir, aug, smoke = sys.argv[1:6]
 cfg = OmegaConf.load(cfg_path)
 cfg.init_from_nemo_model = nemo
 cfg.exp_manager.exp_dir = expdir
 a = cfg.model.train_ds.augmentor
 rir, noise = os.path.join(aug, "rir.json"), os.path.join(aug, "noise.json")
 if os.path.exists(rir) and os.path.getsize(rir) > 5:
-    a.impulse = {"prob": 0.3, "manifest_path": rir}
-    print("[aug] +impulse(RIR)")
+    a.impulse = {"prob": 0.3, "manifest_path": rir}; print("[aug] +impulse(RIR)")
 if os.path.exists(noise) and os.path.getsize(noise) > 5:
     a.noise = {"prob": 0.4, "manifest_path": noise, "min_snr_db": 5, "max_snr_db": 25}
-    print("[aug] +noise(MUSAN/pointsource)")
+    print("[aug] +noise(pointsource)")
+if smoke == "1":
+    # validate the chain fast; use the caption eval (guaranteed non-empty) as val
+    cfg.model.validation_ds.manifest_filepath = "/workspace/data/manifests/val_kirtan_caption.jsonl"
+    cfg.trainer.max_steps = 200
+    cfg.trainer.max_epochs = 2
+    cfg.trainer.val_check_interval = 100
+    cfg.trainer.num_sanity_val_steps = 1
+    cfg.model.optim.sched.warmup_steps = 20
+    cfg.exp_manager.create_early_stopping_callback = False
+    print("[smoke] max_steps=200, val=val_kirtan_caption")
 OmegaConf.save(cfg, cfg_path)
 print("[cfg] augmentor:", OmegaConf.to_yaml(cfg.model.train_ds.augmentor))
 EOF
@@ -183,9 +198,13 @@ json.dump(summary, open(f"{rd}/RESULTS.json", "w"), indent=2, ensure_ascii=False
 print(json.dumps(summary, indent=2, ensure_ascii=False))
 EOF
 
-huggingface-cli repo create indicconformer-pa-v3-kirtan --type model -y || true
-[ -f "$BEST" ] && huggingface-cli upload surindersinghssj/indicconformer-pa-v3-kirtan \
-    "$BEST" indicconformer-pa-v3-kirtan.nemo --create-pr=false || true
+if [ "$SMOKE" = "1" ]; then
+    echo "[push] SMOKE: NOT pushing model (chain-validation only); logs go to runlogs"
+else
+    huggingface-cli repo create indicconformer-pa-v3-kirtan --type model -y || true
+    [ -f "$BEST" ] && huggingface-cli upload surindersinghssj/indicconformer-pa-v3-kirtan \
+        "$BEST" indicconformer-pa-v3-kirtan.nemo --create-pr=false || true
+fi
 huggingface-cli repo create indicconformer-pa-v3-kirtan-runlogs --type dataset -y || true
 huggingface-cli upload --repo-type dataset surindersinghssj/indicconformer-pa-v3-kirtan-runlogs \
     "$RUN_DIR/RESULTS.json" "runs/$RUN_TS/RESULTS.json" --create-pr=false || true
