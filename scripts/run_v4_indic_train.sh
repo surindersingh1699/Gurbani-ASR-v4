@@ -104,6 +104,45 @@ else
     cp "$RUN_DIR/train_dropped_video_ids.txt" "$RUN_DIR/train_dropped_video_ids.txt" 2>/dev/null || true
 fi
 
+# ----- 4b. PREVALIDATE: cheap chain check BEFORE the expensive 250GB full decode -----
+# Decode a tiny slice + run 20 NeMo steps. If the chain is broken (decode schema,
+# tokenizer patch, NeMo config, train/val loop) we find out now for ~$0.10 instead
+# of after a multi-hour full decode. Skipped in SMOKE (that IS the validate) or PREVALIDATE=0.
+if [ "${PREVALIDATE:-1}" = "1" ] && [ "$SMOKE" != "1" ]; then
+    echo "=== 4b. PREVALIDATE (limit-400 decode + 20-step train sanity) ==="
+    VD=/workspace/data_prevalidate; mkdir -p "$VD/manifests"
+    python "$REPO_DIR/scripts/build_indicconformer_manifests_parallel.py" \
+        --data-root "$VD" --audio-root "$VD/audio" \
+        --leaked-file "$RUN_DIR/train_dropped_video_ids.txt" \
+        --workers "$(($(nproc)-1))" --limit 400 2>&1 | tee -a "$RUN_DIR/prevalidate_log.txt"
+    cp "$REPO_DIR/training/indicconformer_pa_v3_kirtan.yaml" "$RUN_DIR/prevalidate.yaml"
+    python - "$RUN_DIR/prevalidate.yaml" "$NEMO_PATH" "$RUN_DIR/prevalidate_ckpt" "$VD" <<'EOF'
+import sys
+from omegaconf import OmegaConf
+cfg_path, nemo, expdir, vd = sys.argv[1:5]
+cfg = OmegaConf.load(cfg_path)
+cfg.init_from_nemo_model = nemo
+cfg.exp_manager.exp_dir = expdir
+cfg.exp_manager.create_early_stopping_callback = False
+cfg.exp_manager.checkpoint_callback_params.save_top_k = 0
+cfg.model.train_ds.manifest_filepath = f"{vd}/manifests/train.jsonl"
+cfg.model.validation_ds.manifest_filepath = f"{vd}/manifests/val_kirtan_caption.jsonl"
+cfg.trainer.max_steps = 20
+cfg.trainer.max_epochs = 1
+cfg.trainer.val_check_interval = 10
+cfg.trainer.num_sanity_val_steps = 1
+OmegaConf.save(cfg, cfg_path)
+print("[prevalidate] config: max_steps=20")
+EOF
+    if ! python /workspace/ai4bharat-nemo/examples/asr/asr_hybrid_transducer_ctc/speech_to_text_hybrid_rnnt_ctc_bpe.py \
+        --config-path="$RUN_DIR" --config-name="prevalidate.yaml" 2>&1 | tee -a "$RUN_DIR/prevalidate_log.txt"; then
+        echo "[FATAL] PREVALIDATE failed — NOT starting the full 250GB decode. See prevalidate_log.txt"
+        exit 3
+    fi
+    rm -rf "$RUN_DIR/prevalidate_ckpt" "$VD" || true   # free the throwaway slice
+    echo "=== PREVALIDATE OK — proceeding to full decode + train ==="
+fi
+
 # ----- 5. build manifests (decode cleanv2 parquet -> FLAC; kirtan HIGH-only, bani FULL) -----
 mkdir -p /workspace/data/manifests
 LIMIT_ARG=""; [ "$SMOKE" = "1" ] && LIMIT_ARG="--limit 600"
