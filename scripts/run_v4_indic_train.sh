@@ -193,5 +193,10 @@ huggingface-cli upload --repo-type dataset surindersinghssj/indicconformer-pa-v3
     "$RUN_DIR/log.txt" "runs/$RUN_TS/log.txt" --create-pr=false || true
 
 echo "=== DONE $(date) — self-terminating pod $RUNPOD_POD_ID in 60s ==="
+# ensure runpodctl exists in-pod for self-terminate (cost guard; reads RUNPOD_API_KEY env)
+if ! command -v runpodctl >/dev/null 2>&1; then
+    wget -qO /usr/local/bin/runpodctl https://github.com/runpod/runpodctl/releases/latest/download/runpodctl-linux-amd64 \
+        && chmod +x /usr/local/bin/runpodctl || true
+fi
 sleep 60
 runpodctl remove pod "$RUNPOD_POD_ID" 2>/dev/null || runpodctl stop pod "$RUNPOD_POD_ID" 2>/dev/null || true
