@@ -31,7 +31,7 @@ model:
     sample_rate: 16000
     batch_size: 32                # OOM-safe; CPU-bound at 87% util so bigger batch wouldn't help
     shuffle: true
-    num_workers: 12               # was 16 — 9 vCPU pod + 12+4 workers stops thrashing
+    num_workers: 32               # 96-vCPU pod; feed GPU (was 12, data-starved) — 9 vCPU pod + 12+4 workers stops thrashing
     pin_memory: true
     persistent_workers: true      # don't respawn workers between epochs
     prefetch_factor: 4            # was default 2 — keep GPU fed
@@ -110,12 +110,12 @@ trainer:
   num_nodes: 1
   max_epochs: 12                 # fallback only; max_steps is the real cap
                                  # v4-clean pool ≈868h unique / ~1420h effective (kirtan x2 + bani)
-  max_steps: 50000               # bigger corpus + hard aug → more room; early-stop (patience 4) cuts it
+  max_steps: 6000               # bigger corpus + hard aug → more room; early-stop (patience 4) cuts it
   accumulate_grad_batches: 2     # effective batch = 128 micro × 2 accum = 256
   gradient_clip_val: 1.0
   precision: bf16-mixed
   log_every_n_steps: 50
-  val_check_interval: 2000
+  val_check_interval: 1000
   check_val_every_n_epoch: 1     # NeMo can't handle null
   num_sanity_val_steps: 2
   sync_batchnorm: false
@@ -141,7 +141,7 @@ exp_manager:
     monitor: "val_wer"           # NeMo logs val_wer for the first val dataloader (kirtan)
     mode: "min"
     min_delta: 0.005             # 0.5pp WER improvement to count as progress
-    patience: 4                  # 4 evals × 2000 steps = 8000 steps with no improvement → stop
+    patience: 3                  # 4 evals × 2000 steps = 8000 steps with no improvement → stop
     verbose: true
 
   # ---- save best 3 by kirtan WER + last ----
