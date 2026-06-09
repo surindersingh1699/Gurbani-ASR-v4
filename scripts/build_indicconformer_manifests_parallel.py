@@ -56,18 +56,14 @@ def load_concat_split(name, limit=0):
     so there is NO 'train' split. Original repos do have 'train'. Return a single
     Dataset covering everything (or first `limit` rows from the first part for smoke)."""
     from datasets import load_dataset, concatenate_datasets, get_dataset_split_names
-    try:
-        avail = list(get_dataset_split_names(name))
-    except Exception:
-        avail = []
+    avail = sorted(get_dataset_split_names(name))   # metadata only — no full download
     if "train" in avail:
         return load_dataset(name, split=f"train[:{limit}]" if limit else "train")
-    dd = load_dataset(name)
-    keys = sorted(dd.keys())
     if limit:
-        first = dd[keys[0]]
-        return first.select(range(min(limit, len(first))))
-    return concatenate_datasets([dd[k] for k in keys])
+        # smoke: pull ONLY the first part, not all ~108 (avoids a 60GB download for 400 rows)
+        return load_dataset(name, split=f"{avail[0]}[:{limit}]")
+    # full: load each part split and concatenate (this IS the real decode download)
+    return concatenate_datasets([load_dataset(name, split=k) for k in avail])
 
 
 def normalize_gurbani_text(text: str) -> str:
