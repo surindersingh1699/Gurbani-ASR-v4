@@ -16,6 +16,7 @@ exec > >(tee -a /tmp/early.log) 2>&1
 echo "=== $(date) — v4 indic train startup ==="
 
 export DEBIAN_FRONTEND=noninteractive
+export PIP_BREAK_SYSTEM_PACKAGES=1   # image is Ubuntu 24.04 / PEP 668 — pip refuses system installs without this (was the crash-loop cause)
 export HF_HOME=/workspace/cache/huggingface
 export HF_DATASETS_CACHE=/workspace/cache/huggingface/datasets
 export TRANSFORMERS_CACHE=$HF_HOME/transformers
@@ -33,7 +34,7 @@ SMOKE="${SMOKE:-0}"   # SMOKE=1 -> tiny slice, ~200 steps, no model push (valida
 set -x   # verbose: the pushed log shows EXACTLY which command fails
 
 # ----- 0. HF auth + log trap + heartbeat FIRST so ANY later failure is captured -----
-pip install -U -q "huggingface_hub>=0.34,<1.0" hf_transfer || pip install -q huggingface_hub
+pip install -q "huggingface_hub==0.23.2" hf_transfer || pip install -q huggingface_hub  # NeMo 1.23 needs hub 0.23.x
 huggingface-cli login --token "$HF_TOKEN" --add-to-git-credential || true
 RUNLOGS=surindersinghssj/indicconformer-pa-v3-kirtan-runlogs
 huggingface-cli repo create "$(basename $RUNLOGS)" --type dataset -y 2>/dev/null || true
@@ -65,9 +66,23 @@ if [ ! -d /workspace/ai4bharat-nemo ]; then
     sed -i '/^triton$/d' /workspace/ai4bharat-nemo/requirements/requirements.txt
 fi
 pip install -q --no-deps /workspace/ai4bharat-nemo
-pip install -q "numpy<2" "datasets<4" soundfile librosa jiwer omegaconf hydra-core \
-              pytorch-lightning sentencepiece youtokentome editdistance \
-              braceexpand kaldiio lhotse pyannote.metrics texterrors
+# Era-consistent pins: AI4Bharat NeMo 1.23 fork (2024) vs this Ubuntu24.04/py3.12/torch2.8
+# image. Newer hub/transformers/lightning break NeMo imports (ModelFilter,
+# is_offline_mode, NeptuneLogger). youtokentome won't build on py3.12 and isn't needed
+# (sentencepiece/BPE path). These exact versions verified to import nemo.collections.asr.
+pip install -q "numpy<2" "huggingface_hub==0.23.2" "datasets==2.20.0" "transformers==4.40.2" \
+              "pytorch-lightning==2.1.4" soundfile librosa jiwer omegaconf hydra-core \
+              sentencepiece editdistance braceexpand kaldiio lhotse pyannote.metrics texterrors \
+              wrapt wget onnx inflect text_unidecode ruamel.yaml tensorboard webdataset matplotlib
+# Safety: tolerate ModelFilter removal in hub>=0.24 (only used for HF model search).
+python - <<'PYF'
+import glob, re
+for f in glob.glob("/usr/local/lib/python3*/dist-packages/nemo/**/*.py", recursive=True):
+    s=open(f).read()
+    if ", ModelFilter" in s or "ModelFilter," in s:
+        s2=re.sub(r"(from huggingface_hub import [^\n]+\n)", r"\1ModelFilter = None\n", s.replace(", ModelFilter","").replace("ModelFilter,",""), count=1)
+        if s2!=s: open(f,"w").write(s2)
+PYF
 python -c "import nemo.collections.asr as a; print('NeMo OK')"
 
 # ----- 2. patch multilingual tokenizer -----
