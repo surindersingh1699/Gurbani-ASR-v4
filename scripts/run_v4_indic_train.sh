@@ -49,6 +49,20 @@ push_logs_on_exit() {
 }
 trap push_logs_on_exit EXIT
 
+# Heartbeat: every 5 min push a live log tail to runlogs/heartbeat.txt so the run
+# is watchable without SSH (no in-pod access on these pods). Killed by the trap.
+( while true; do
+    sleep 300
+    { echo "=== heartbeat $(date -u) ==="; echo "--- df /workspace ---"; df -h /workspace 2>/dev/null
+      echo "--- gpu ---"; nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader 2>/dev/null
+      echo "--- log tail ---"; tail -30 "$RUN_DIR/log.txt" 2>/dev/null
+      echo "--- train tail ---"; tail -25 "$RUN_DIR/train_log.txt" 2>/dev/null; } > "$RUN_DIR/heartbeat.txt"
+    huggingface-cli upload --repo-type dataset "$RUNLOGS" \
+        "$RUN_DIR/heartbeat.txt" "runs/$RUN_TS/heartbeat.txt" --create-pr=false 2>/dev/null || true
+  done ) &
+HEARTBEAT_PID=$!
+trap '[ -n "${HEARTBEAT_PID:-}" ] && kill $HEARTBEAT_PID 2>/dev/null; push_logs_on_exit' EXIT
+
 if [ ! -d /workspace/ai4bharat-nemo ]; then
     git clone --depth 1 -b nemo-v2 https://github.com/AI4Bharat/NeMo.git /workspace/ai4bharat-nemo
     sed -i '/^triton$/d' /workspace/ai4bharat-nemo/requirements/requirements.txt
