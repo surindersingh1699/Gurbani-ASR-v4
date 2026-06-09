@@ -73,7 +73,7 @@ pip install -q --no-deps /workspace/ai4bharat-nemo
 pip install -q "numpy<2" "huggingface_hub==0.23.2" "datasets==2.20.0" "transformers==4.40.2" \
               "pytorch-lightning==2.1.4" soundfile librosa jiwer omegaconf hydra-core \
               sentencepiece editdistance braceexpand kaldiio lhotse pyannote.metrics texterrors \
-              wrapt wget onnx inflect text_unidecode ruamel.yaml tensorboard webdataset matplotlib
+              wrapt wget onnx inflect text_unidecode ruamel.yaml tensorboard webdataset matplotlib resampy
 # Safety: tolerate ModelFilter removal in hub>=0.24 (only used for HF model search).
 python - <<'PYF'
 import glob, re
