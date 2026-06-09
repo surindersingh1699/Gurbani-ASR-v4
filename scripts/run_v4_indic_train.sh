@@ -160,8 +160,8 @@ cfg.trainer.num_sanity_val_steps = 1
 OmegaConf.save(cfg, cfg_path)
 print("[prevalidate] config: max_steps=20")
 EOF
-    if ! python /workspace/ai4bharat-nemo/examples/asr/asr_hybrid_transducer_ctc/speech_to_text_hybrid_rnnt_ctc_bpe.py \
-        --config-path="$RUN_DIR" --config-name="prevalidate.yaml" 2>&1 | tee -a "$RUN_DIR/prevalidate_log.txt"; then
+    if ! python "$REPO_DIR/scripts/train_indicconformer_finetune.py" \
+        "$RUN_DIR/prevalidate.yaml" 2>&1 | tee -a "$RUN_DIR/prevalidate_log.txt"; then
         echo "[FATAL] PREVALIDATE failed — NOT starting the full 250GB decode. See prevalidate_log.txt"
         exit 3
     fi
@@ -246,8 +246,8 @@ EOF
 
 # ----- 8. train -----
 echo "=== train ==="
-python /workspace/ai4bharat-nemo/examples/asr/asr_hybrid_transducer_ctc/speech_to_text_hybrid_rnnt_ctc_bpe.py \
-    --config-path="$RUN_DIR" --config-name="config.yaml" 2>&1 | tee -a "$RUN_DIR/train_log.txt"
+python "$REPO_DIR/scripts/train_indicconformer_finetune.py" \
+    "$RUN_DIR/config.yaml" 2>&1 | tee -a "$RUN_DIR/train_log.txt"
 
 # ----- 9. KIRTAN-ONLY eval (best ckpt, both decoders) -----
 BEST=$(ls -t "$RUN_DIR/checkpoints"/*.nemo 2>/dev/null | head -1)
