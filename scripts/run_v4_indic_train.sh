@@ -140,7 +140,7 @@ if [ "${PREVALIDATE:-1}" = "1" ] && [ "$SMOKE" != "1" ]; then
     python "$REPO_DIR/scripts/build_indicconformer_manifests_parallel.py" \
         --data-root "$VD" --audio-root "$VD/audio" \
         --leaked-file "$RUN_DIR/train_dropped_video_ids.txt" \
-        --workers "$(($(nproc)-1))" --limit 400 2>&1 | tee -a "$RUN_DIR/prevalidate_log.txt"
+        --workers 4 --limit 400 2>&1 | tee -a "$RUN_DIR/prevalidate_log.txt"
     cp "$REPO_DIR/training/indicconformer_pa_v3_kirtan.yaml" "$RUN_DIR/prevalidate.yaml"
     python - "$RUN_DIR/prevalidate.yaml" "$NEMO_PATH" "$RUN_DIR/prevalidate_ckpt" "$VD" <<'EOF'
 import sys
@@ -176,7 +176,7 @@ python "$REPO_DIR/scripts/build_indicconformer_manifests_parallel.py" \
     --data-root /workspace/data \
     --audio-root /workspace/data/audio \
     --leaked-file "$RUN_DIR/train_dropped_video_ids.txt" \
-    --workers "$(($(nproc)-1))" $LIMIT_ARG
+    --workers 12 $LIMIT_ARG
 MIN_TRAIN=1000; [ "$SMOKE" = "1" ] && MIN_TRAIN=100
 for m in train.jsonl val_kirtan_caption.jsonl; do
     n=$(wc -l < /workspace/data/manifests/$m 2>/dev/null || echo 0)

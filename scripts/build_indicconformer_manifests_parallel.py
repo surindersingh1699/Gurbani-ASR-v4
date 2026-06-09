@@ -55,18 +55,27 @@ def load_concat_split(name, limit=0):
     """cleanv2 repos were pushed one-split-per-part (clean_phase1_*_partNNNN),
     so there is NO 'train' split. Original repos do have 'train'. Return a single
     Dataset covering everything (or first `limit` rows from the first part for smoke)."""
+    # Back-compat shim: resolve local files then load. Prefer local_parquet_files() +
+    # load-from-local in workers (see materialize_parallel) to avoid the HF API 429 storm.
     from datasets import load_dataset
-    sp = f"train[:{limit}]" if limit else "train"
-    try:
-        # original / eval repos have a real 'train' split
-        return load_dataset(name, split=sp)
-    except Exception:
-        # cleanv2 repos were pushed one-split-per-part (clean_phase1_*), no 'train'.
-        # Loading 108 named splits via load_dataset(name) is slow; instead read the raw
-        # parquet glob as a single 'train' split. 'train[:N]' then reads only the first
-        # file(s) — keeps --limit smoke cheap. Worker casts the audio struct -> Audio.
-        glob = f"hf://datasets/{name}/**/*.parquet"
-        return load_dataset("parquet", data_files={"train": glob}, split=sp)
+    files = local_parquet_files(name, limit)
+    return load_dataset("parquet", data_files={"train": files},
+                        split=f"train[:{limit}]" if limit else "train")
+
+
+def local_parquet_files(name, limit=0):
+    """Download the repo's parquet to local cache ONCE and return sorted local paths.
+    Loading via `hf://**/*.parquet` re-globs + repo_info per worker → 2500 req/5min HF
+    rate limit (429). Downloading once (snapshot/hub_download) then loading local files
+    in each worker makes zero further HF API calls."""
+    import glob as _glob
+    from huggingface_hub import snapshot_download, list_repo_files, hf_hub_download
+    if limit:
+        # smoke: only the first parquet file (one list call + one file download)
+        pfiles = sorted(f for f in list_repo_files(name, repo_type="dataset") if f.endswith(".parquet"))
+        return [hf_hub_download(repo_id=name, filename=pfiles[0], repo_type="dataset")]
+    d = snapshot_download(repo_id=name, repo_type="dataset", allow_patterns="*.parquet")
+    return sorted(_glob.glob(f"{d}/**/*.parquet", recursive=True))
 
 
 def normalize_gurbani_text(text: str) -> str:
@@ -95,13 +104,15 @@ def passes_simran_filter(text: str) -> bool:
 
 def _worker_decode_shard(args):
     """Decode one shard of the dataset. Runs in a child process."""
-    name, text_col, audio_outdir, leaked, shard_idx, num_shards, quality_filter, limit = args
+    name, files, text_col, audio_outdir, leaked, shard_idx, num_shards, quality_filter, limit = args
     import soundfile as sf
     from datasets import load_dataset, Audio
     audio_outdir = Path(audio_outdir)
     audio_outdir.mkdir(parents=True, exist_ok=True)
 
-    ds = load_concat_split(name, limit)
+    # load from LOCAL parquet (already downloaded by main) — no HF API calls here
+    ds = load_dataset("parquet", data_files={"train": files},
+                      split=f"train[:{limit}]" if limit else "train")
     ds = ds.cast_column("audio", Audio(sampling_rate=16000))
     n = len(ds)
     # Slice this shard
@@ -145,14 +156,18 @@ def materialize_parallel(name: str, audio_outdir: Path, leaked: set[str],
                           text_col: str, num_workers: int,
                           quality_filter: str | None = None, limit: int = 0):
     """Decode the whole dataset in parallel, return list of manifest entries."""
-    print(f"[{name}] sizing dataset (quality_filter={quality_filter} limit={limit}) ...", flush=True)
-    ds = load_concat_split(name, limit)
+    from datasets import load_dataset
+    print(f"[{name}] resolving local parquet (limit={limit}) ...", flush=True)
+    files = local_parquet_files(name, limit)   # download ONCE in main → workers read local
+    print(f"[{name}] {len(files)} local parquet files", flush=True)
+    ds = load_dataset("parquet", data_files={"train": files},
+                      split=f"train[:{limit}]" if limit else "train")
     n = len(ds)
     print(f"[{name}] {n} rows; sharding across {num_workers} workers", flush=True)
     del ds  # free metadata before forking
 
     args_list = [
-        (name, text_col, str(audio_outdir), leaked, i, num_workers, quality_filter, limit)
+        (name, files, text_col, str(audio_outdir), leaked, i, num_workers, quality_filter, limit)
         for i in range(num_workers)
     ]
     all_entries = []
