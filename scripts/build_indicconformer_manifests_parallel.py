@@ -55,15 +55,18 @@ def load_concat_split(name, limit=0):
     """cleanv2 repos were pushed one-split-per-part (clean_phase1_*_partNNNN),
     so there is NO 'train' split. Original repos do have 'train'. Return a single
     Dataset covering everything (or first `limit` rows from the first part for smoke)."""
-    from datasets import load_dataset, concatenate_datasets, get_dataset_split_names
-    avail = sorted(get_dataset_split_names(name))   # metadata only — no full download
-    if "train" in avail:
-        return load_dataset(name, split=f"train[:{limit}]" if limit else "train")
-    if limit:
-        # smoke: pull ONLY the first part, not all ~108 (avoids a 60GB download for 400 rows)
-        return load_dataset(name, split=f"{avail[0]}[:{limit}]")
-    # full: load each part split and concatenate (this IS the real decode download)
-    return concatenate_datasets([load_dataset(name, split=k) for k in avail])
+    from datasets import load_dataset
+    sp = f"train[:{limit}]" if limit else "train"
+    try:
+        # original / eval repos have a real 'train' split
+        return load_dataset(name, split=sp)
+    except Exception:
+        # cleanv2 repos were pushed one-split-per-part (clean_phase1_*), no 'train'.
+        # Loading 108 named splits via load_dataset(name) is slow; instead read the raw
+        # parquet glob as a single 'train' split. 'train[:N]' then reads only the first
+        # file(s) — keeps --limit smoke cheap. Worker casts the audio struct -> Audio.
+        glob = f"hf://datasets/{name}/**/*.parquet"
+        return load_dataset("parquet", data_files={"train": glob}, split=sp)
 
 
 def normalize_gurbani_text(text: str) -> str:
