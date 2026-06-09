@@ -51,6 +51,25 @@ def subsample_to_hours(entries, target_h):
     return kept
 
 
+def load_concat_split(name, limit=0):
+    """cleanv2 repos were pushed one-split-per-part (clean_phase1_*_partNNNN),
+    so there is NO 'train' split. Original repos do have 'train'. Return a single
+    Dataset covering everything (or first `limit` rows from the first part for smoke)."""
+    from datasets import load_dataset, concatenate_datasets, get_dataset_split_names
+    try:
+        avail = list(get_dataset_split_names(name))
+    except Exception:
+        avail = []
+    if "train" in avail:
+        return load_dataset(name, split=f"train[:{limit}]" if limit else "train")
+    dd = load_dataset(name)
+    keys = sorted(dd.keys())
+    if limit:
+        first = dd[keys[0]]
+        return first.select(range(min(limit, len(first))))
+    return concatenate_datasets([dd[k] for k in keys])
+
+
 def normalize_gurbani_text(text: str) -> str:
     text = re.sub(r'॥[੦-੯]+॥', '', text)
     text = re.sub(r'॥', '', text)
@@ -83,8 +102,7 @@ def _worker_decode_shard(args):
     audio_outdir = Path(audio_outdir)
     audio_outdir.mkdir(parents=True, exist_ok=True)
 
-    split = f"train[:{limit}]" if limit else "train"   # smoke: only first shard(s)
-    ds = load_dataset(name, split=split)
+    ds = load_concat_split(name, limit)
     ds = ds.cast_column("audio", Audio(sampling_rate=16000))
     n = len(ds)
     # Slice this shard
@@ -128,9 +146,8 @@ def materialize_parallel(name: str, audio_outdir: Path, leaked: set[str],
                           text_col: str, num_workers: int,
                           quality_filter: str | None = None, limit: int = 0):
     """Decode the whole dataset in parallel, return list of manifest entries."""
-    from datasets import load_dataset
     print(f"[{name}] sizing dataset (quality_filter={quality_filter} limit={limit}) ...", flush=True)
-    ds = load_dataset(name, split=f"train[:{limit}]" if limit else "train")
+    ds = load_concat_split(name, limit)
     n = len(ds)
     print(f"[{name}] {n} rows; sharding across {num_workers} workers", flush=True)
     del ds  # free metadata before forking
