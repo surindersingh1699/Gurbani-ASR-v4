@@ -195,18 +195,22 @@ elif [ ! -f "$AUG/rir.json" ]; then
         python - "$AUG" <<'EOF'
 import sys, glob, json, soundfile as sf, os
 aug = sys.argv[1]; base = os.path.join(aug, "RIRS_NOISES")
-def manifest(globs, out):
+def manifest(globs, out, mono_only=False):
     rows = []
     for g in globs:
         for f in glob.glob(g, recursive=True):
             try:
-                info = sf.info(f); rows.append({"audio_filepath": f,
+                info = sf.info(f)
+                if mono_only and info.channels != 1:
+                    continue   # NeMo convolves/mixes against MONO audio; multichannel -> dim mismatch crash
+                rows.append({"audio_filepath": f,
                     "duration": round(info.frames/info.samplerate, 3), "text": ""})
             except Exception: pass
     open(out, "w").write("\n".join(json.dumps(r) for r in rows) + "\n")
     print(f"  {out}: {len(rows)} files"); return len(rows)
-nr = manifest([f"{base}/simulated_rirs/**/*.wav", f"{base}/real_rirs_isotropic_noises/*.wav"], f"{aug}/rir.json")
-nn = manifest([f"{base}/pointsource_noises/*.wav"], f"{aug}/noise.json")
+# RIR: simulated_rirs only (real_rirs_isotropic_noises are multichannel) + mono filter
+nr = manifest([f"{base}/simulated_rirs/**/*.wav"], f"{aug}/rir.json", mono_only=True)
+nn = manifest([f"{base}/pointsource_noises/*.wav"], f"{aug}/noise.json", mono_only=True)
 open(f"{aug}/_ok", "w").write(f"rir={nr} noise={nn}")
 EOF
     else
