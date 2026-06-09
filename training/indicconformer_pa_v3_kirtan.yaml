@@ -110,7 +110,7 @@ trainer:
   num_nodes: 1
   max_epochs: 12                 # fallback only; max_steps is the real cap
                                  # v4-clean pool ≈868h unique / ~1420h effective (kirtan x2 + bani)
-  max_steps: 6000               # bigger corpus + hard aug → more room; early-stop (patience 4) cuts it
+  max_steps: 25000             # ceiling only — early-stop (val 1000, patience 3) ends it when kirtan CER plateaus
   accumulate_grad_batches: 2     # effective batch = 128 micro × 2 accum = 256
   gradient_clip_val: 1.0
   precision: bf16-mixed
