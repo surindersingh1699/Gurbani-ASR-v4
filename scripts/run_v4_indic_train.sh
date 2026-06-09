@@ -30,38 +30,35 @@ BRANCH="${REPO_BRANCH:-feat/anchor-first-letter-v1}"
 SMOKE="${SMOKE:-0}"   # SMOKE=1 -> tiny slice, ~200 steps, no model push (validate chain ~$1)
 [ "$SMOKE" = "1" ] && echo "*** SMOKE MODE: validating chain, not a real model ***"
 
-# ----- 1. install -----
-apt-get update -qq && apt-get install -y -qq git ffmpeg sox libsndfile1 jq unzip wget
-pip install -U -q "huggingface_hub>=0.34,<1.0" hf_transfer
-huggingface-cli login --token "$HF_TOKEN" --add-to-git-credential || true
-[[ -n "${WANDB_API_KEY:-}" ]] && pip install -U -q wandb && wandb login "$WANDB_API_KEY" || true
+set -x   # verbose: the pushed log shows EXACTLY which command fails
 
-# Always push logs to runlogs on exit (esp. on early failure) so we can diagnose.
+# ----- 0. HF auth + log trap + heartbeat FIRST so ANY later failure is captured -----
+pip install -U -q "huggingface_hub>=0.34,<1.0" hf_transfer || pip install -q huggingface_hub
+huggingface-cli login --token "$HF_TOKEN" --add-to-git-credential || true
 RUNLOGS=surindersinghssj/indicconformer-pa-v3-kirtan-runlogs
 huggingface-cli repo create "$(basename $RUNLOGS)" --type dataset -y 2>/dev/null || true
 push_logs_on_exit() {
-    local code=$?
+    local code=$?; set +x
     echo "[trap] exit $code — pushing logs to $RUNLOGS"
     for lf in log.txt train_log.txt; do
         [ -f "$RUN_DIR/$lf" ] && huggingface-cli upload --repo-type dataset "$RUNLOGS" \
             "$RUN_DIR/$lf" "runs/$RUN_TS/$lf" --create-pr=false 2>/dev/null || true
     done
 }
-trap push_logs_on_exit EXIT
-
-# Heartbeat: every 5 min push a live log tail to runlogs/heartbeat.txt so the run
-# is watchable without SSH (no in-pod access on these pods). Killed by the trap.
 ( while true; do
     sleep 300
-    { echo "=== heartbeat $(date -u) ==="; echo "--- df /workspace ---"; df -h /workspace 2>/dev/null
+    { echo "=== heartbeat $(date -u) ==="; echo "--- df ---"; df -h /workspace 2>/dev/null
       echo "--- gpu ---"; nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader 2>/dev/null
-      echo "--- log tail ---"; tail -30 "$RUN_DIR/log.txt" 2>/dev/null
+      echo "--- log tail ---"; tail -40 "$RUN_DIR/log.txt" 2>/dev/null
       echo "--- train tail ---"; tail -25 "$RUN_DIR/train_log.txt" 2>/dev/null; } > "$RUN_DIR/heartbeat.txt"
     huggingface-cli upload --repo-type dataset "$RUNLOGS" \
         "$RUN_DIR/heartbeat.txt" "runs/$RUN_TS/heartbeat.txt" --create-pr=false 2>/dev/null || true
-  done ) &
-HEARTBEAT_PID=$!
+  done ) & HEARTBEAT_PID=$!
 trap '[ -n "${HEARTBEAT_PID:-}" ] && kill $HEARTBEAT_PID 2>/dev/null; push_logs_on_exit' EXIT
+
+# ----- 1. system install -----
+apt-get update -qq && apt-get install -y -qq git ffmpeg sox libsndfile1 jq unzip wget
+[[ -n "${WANDB_API_KEY:-}" ]] && pip install -U -q wandb && wandb login "$WANDB_API_KEY" || true
 
 if [ ! -d /workspace/ai4bharat-nemo ]; then
     git clone --depth 1 -b nemo-v2 https://github.com/AI4Bharat/NeMo.git /workspace/ai4bharat-nemo
