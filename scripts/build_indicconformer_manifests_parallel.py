@@ -103,72 +103,76 @@ def passes_simran_filter(text: str) -> bool:
 
 
 def _worker_decode_shard(args):
-    """Decode one shard of the dataset. Runs in a child process."""
-    name, files, text_col, audio_outdir, leaked, shard_idx, num_shards, quality_filter, limit = args
-    import soundfile as sf
-    from datasets import load_dataset, Audio
+    """Decode this worker's assigned parquet FILES directly via pyarrow — no
+    datasets arrow cache (which doubled disk → quota-exceeded). The HF Audio
+    column is stored decode=False as a struct {bytes, path}; decode bytes with
+    soundfile. File-level sharding (worker i gets files[i::N])."""
+    files, text_col, audio_outdir, leaked, shard_idx, quality_filter, limit = args
+    import io, numpy as np, soundfile as sf
+    import pyarrow.parquet as pq
     audio_outdir = Path(audio_outdir)
     audio_outdir.mkdir(parents=True, exist_ok=True)
 
-    # load from LOCAL parquet (already downloaded by main) — no HF API calls here
-    ds = load_dataset("parquet", data_files={"train": files},
-                      split=f"train[:{limit}]" if limit else "train")
-    ds = ds.cast_column("audio", Audio(sampling_rate=16000))
-    n = len(ds)
-    # Slice this shard
-    start = shard_idx * n // num_shards
-    end = (shard_idx + 1) * n // num_shards
-    sub = ds.select(range(start, end))
-
     entries = []
-    kept = dropped = decoded = 0
-    for i, ex in enumerate(sub):
-        vid = ex.get("video_id", "")
-        if vid in leaked:
-            dropped += 1; continue
-        # quality gate: kirtan sources pass quality_filter='high' (skeleton-clean
-        # verbatim only); bani passes quality_filter=None (full pass-through).
-        if quality_filter is not None and (ex.get("quality") or "") != quality_filter:
-            dropped += 1; continue
-        text = (ex.get(text_col) or ex.get("transcription") or ex.get("text") or "").strip()
-        text = normalize_gurbani_text(text)
-        if not text or not passes_simran_filter(text):
-            dropped += 1; continue
-
-        clip_id = ex.get("clip_id") or f"{vid}_{start+i:08d}"
-        flac_path = audio_outdir / f"{clip_id}.flac"
-        audio = ex["audio"]["array"]
-        sr = ex["audio"]["sampling_rate"]
-        if not flac_path.exists():
-            try:
-                sf.write(str(flac_path), audio.astype("float32"), sr, format="FLAC", subtype="PCM_16")
-                decoded += 1
-            except Exception as e:
-                print(f"  [shard {shard_idx}] decode fail {clip_id}: {e}", flush=True)
+    kept = dropped = decoded = seen = 0
+    for fp in files:
+        for ex in pq.read_table(fp).to_pylist():
+            if limit and seen >= limit:
+                break
+            seen += 1
+            vid = ex.get("video_id", "") or ""
+            if vid in leaked:
                 dropped += 1; continue
-        duration = float(audio.shape[0]) / float(sr)
-        entries.append((str(flac_path), duration, text, vid))
-        kept += 1
+            if quality_filter is not None and (ex.get("quality") or "") != quality_filter:
+                dropped += 1; continue
+            raw = ex.get(text_col) or ex.get("transcription") or ex.get("text") or ""
+            text = normalize_gurbani_text(raw.strip() if isinstance(raw, str) else "")
+            if not text or not passes_simran_filter(text):
+                dropped += 1; continue
+            au = ex.get("audio")
+            try:
+                if isinstance(au, dict) and au.get("bytes") is not None:
+                    arr, sr = sf.read(io.BytesIO(au["bytes"]), dtype="float32")
+                elif isinstance(au, dict) and au.get("array") is not None:
+                    arr = np.asarray(au["array"], dtype="float32"); sr = int(au.get("sampling_rate") or 16000)
+                else:
+                    dropped += 1; continue
+            except Exception:
+                dropped += 1; continue
+            if getattr(arr, "ndim", 1) > 1:
+                arr = arr.mean(axis=1).astype("float32")
+            if sr != 16000:
+                import librosa
+                arr = librosa.resample(arr, orig_sr=sr, target_sr=16000); sr = 16000
+            clip_id = ex.get("clip_id") or f"{vid}_{shard_idx:03d}_{kept:08d}"
+            flac_path = audio_outdir / f"{clip_id}.flac"
+            if not flac_path.exists():
+                try:
+                    sf.write(str(flac_path), arr, sr, format="FLAC", subtype="PCM_16")
+                    decoded += 1
+                except Exception as e:
+                    print(f"  [shard {shard_idx}] decode fail {clip_id}: {e}", flush=True)
+                    dropped += 1; continue
+            entries.append((str(flac_path), float(len(arr)) / sr, text, vid))
+            kept += 1
+        if limit and seen >= limit:
+            break
     return entries, kept, dropped, decoded, shard_idx
 
 
 def materialize_parallel(name: str, audio_outdir: Path, leaked: set[str],
                           text_col: str, num_workers: int,
                           quality_filter: str | None = None, limit: int = 0):
-    """Decode the whole dataset in parallel, return list of manifest entries."""
-    from datasets import load_dataset
+    """Decode the whole dataset in parallel, return list of manifest entries.
+    File-level sharding: worker i decodes files[i::N] directly via pyarrow."""
     print(f"[{name}] resolving local parquet (limit={limit}) ...", flush=True)
     files = local_parquet_files(name, limit)   # download ONCE in main → workers read local
-    print(f"[{name}] {len(files)} local parquet files", flush=True)
-    ds = load_dataset("parquet", data_files={"train": files},
-                      split=f"train[:{limit}]" if limit else "train")
-    n = len(ds)
-    print(f"[{name}] {n} rows; sharding across {num_workers} workers", flush=True)
-    del ds  # free metadata before forking
+    nw = max(1, min(num_workers, len(files)))
+    print(f"[{name}] {len(files)} parquet files; file-sharding across {nw} workers", flush=True)
 
     args_list = [
-        (name, files, text_col, str(audio_outdir), leaked, i, num_workers, quality_filter, limit)
-        for i in range(num_workers)
+        (files[i::nw], text_col, str(audio_outdir), leaked, i, quality_filter, limit)
+        for i in range(nw)
     ]
     all_entries = []
     total_kept = total_dropped = total_decoded = 0
