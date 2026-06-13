@@ -1,0 +1,149 @@
+# IndicConformer-pa v5 fine-tune — "ultimate" Gurbani kirtan+sehaj model.
+# Target hardware: 1× A40 48GB.
+# Base checkpoint: ai4bharat/indicconformer_stt_pa_hybrid_ctc_rnnt_large (.nemo)
+# v5 vs v4: ALL kirtan (high + content-gated residual, ~1500h) ×1 (no ×2 narrowing
+# that overfit v4), bani 50h→250h (fix sehaj regression), labels >>-stripped +
+# Gurmukhi-only, early-stop on the CLEANED diverse held-out (not 1-video caption).
+# Goal: kirtan_caption_clean CER<20 / WER<30, sehaj ≥ v3 (6.7 CER / 20.2 WER).
+
+name: "indicconformer-pa-v5-kirtan"
+
+init_from_nemo_model: /workspace/data/indicconformer_stt_pa_hybrid_rnnt_large.nemo
+
+model:
+  sample_rate: 16000
+  log_prediction: false
+  ctc_reduction: 'mean_volume'
+  use_cer: true
+
+  aux_ctc:
+    ctc_loss_weight: 0.3
+    use_cer: true
+    decoding:
+      strategy: "greedy"
+
+  tokenizer:
+    update_tokenizer: false
+
+  # ---- training data ----
+  train_ds:
+    manifest_filepath: /workspace/data/manifests/train.jsonl
+    sample_rate: 16000
+    batch_size: 32
+    shuffle: true
+    num_workers: 9                # 10-vCPU pod
+    pin_memory: true
+    persistent_workers: true
+    prefetch_factor: 4
+    use_start_end_token: false
+    trim_silence: false
+    max_duration: 18.0
+    min_duration: 0.5
+    bucketing_strategy: "synced_randomized"
+    bucketing_batch_size: null
+    is_tarred: false
+    return_language_id: true
+
+    # ---- HARD on-the-fly waveform augmentation. Runner appends noise:(MUSAN)
+    # + impulse:(RIRS_NOISES, mono-only) AFTER building those manifests. ----
+    augmentor:
+      speed:
+        prob: 0.6
+        sr: 16000
+        resample_type: 'kaiser_best'
+        min_speed_rate: 0.9
+        max_speed_rate: 1.1
+        num_rates: 5
+      gain:
+        prob: 0.3
+        min_gain_dbfs: -10.0
+        max_gain_dbfs: 10.0
+      white_noise:
+        prob: 0.3
+        min_level: -90
+        max_level: -46
+
+  validation_ds:
+    # PRIMARY val + early-stop signal = cleaned diverse held-out kirtan (39 videos,
+    # leak-free by video, >>-stripped). Stable + in one of the two judge sets.
+    manifest_filepath: /workspace/data/manifests/val_kirtan.jsonl
+    sample_rate: 16000
+    batch_size: 32
+    shuffle: false
+    num_workers: 4
+    pin_memory: true
+    persistent_workers: true
+    return_language_id: true
+
+  test_ds:
+    manifest_filepath: /workspace/data/manifests/val_sehajpath_clean.jsonl
+    sample_rate: 16000
+    batch_size: 32
+    shuffle: false
+    num_workers: 4
+    pin_memory: true
+    persistent_workers: true
+    return_language_id: true
+
+  # ---- SpecAugment — HARD ----
+  spec_augment:
+    _target_: nemo.collections.asr.modules.SpectrogramAugmentation
+    freq_masks: 3
+    time_masks: 10
+    freq_width: 27
+    time_width: 0.05
+
+  # ---- optimizer ----
+  optim:
+    name: adamw
+    lr: 1.0e-4
+    betas: [0.9, 0.98]
+    weight_decay: 1.0e-3
+    sched:
+      name: CosineAnnealing
+      warmup_steps: 2000
+      min_lr: 1.0e-6
+
+trainer:
+  devices: 1
+  accelerator: gpu
+  num_nodes: 1
+  max_epochs: 12
+  max_steps: 60000               # ceiling; ~1750h ×1 is more unique data than v4,
+                                 # early-stop (val 1000, patience 4) ends it at plateau
+  accumulate_grad_batches: 2     # effective batch = 32 × 2 = 64
+  gradient_clip_val: 1.0
+  precision: bf16-mixed
+  log_every_n_steps: 50
+  val_check_interval: 1000
+  check_val_every_n_epoch: 1
+  num_sanity_val_steps: 2
+  sync_batchnorm: false
+  enable_checkpointing: false
+  benchmark: true
+  logger: false
+
+exp_manager:
+  exp_dir: /workspace/checkpoints/indicconformer-pa-v5-kirtan
+  name: indicconformer-pa-v5-kirtan
+  create_tensorboard_logger: true
+  create_wandb_logger: false
+  resume_if_exists: true
+  resume_ignore_no_checkpoint: true
+
+  # ---- early stop on cleaned held-out kirtan CER (val_wer w/ use_cer=true) ----
+  create_early_stopping_callback: true
+  early_stopping_callback_params:
+    monitor: "val_wer"
+    mode: "min"
+    min_delta: 0.005
+    patience: 4                   # more data → slower plateau than v4's 3
+    verbose: true
+
+  checkpoint_callback_params:
+    monitor: "val_wer"
+    mode: "min"
+    save_top_k: 3
+    save_last: true
+    always_save_nemo: true
+    filename: "{epoch}-step{step}-kirtan_wer{val_wer:.4f}"

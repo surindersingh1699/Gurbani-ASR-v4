@@ -11,7 +11,11 @@ build/
 # Virtual environments
 venv/
 .venv/
+.venv-v5clean/
 env/
+
+# GOLD eval audio clips (large binaries; labels jsonl stay tracked)
+gold_eval/audio/
 
 # IDE
 .vscode/

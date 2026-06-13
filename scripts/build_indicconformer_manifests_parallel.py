@@ -79,10 +79,35 @@ def local_parquet_files(name, limit=0):
 
 
 def normalize_gurbani_text(text: str) -> str:
+    # v5: caption residue cleanup. cleanv2 `text`/`final_text` still carry the
+    # YouTube speaker-change marker '>>' AND occasional latin/punctuation even on
+    # quality=high rows (v4 trained on this contamination). Strip verse markers,
+    # then drop EVERYTHING outside the Gurmukhi block U+0A00–U+0A7F (keep spaces),
+    # per the [[gurmukhi-only-caption-filter]] rule the chunker enforces but the
+    # manifest builder never did.
+    text = text.replace('>>', ' ')
     text = re.sub(r'॥[੦-੯]+॥', '', text)
     text = re.sub(r'॥', '', text)
+    text = re.sub(r'[^਀-੿ ]', ' ', text)   # Gurmukhi-only
     text = re.sub(r'\s+', ' ', text).strip()
     return text
+
+
+# v5: content gate for low-confidence `residual`-tier kirtan/bani clips. `high`
+# rows pass through; residual rows are kept only if, AFTER cleaning, the label is
+# still mostly-Gurmukhi and word-like — drops the noisy/garbage residual tail
+# while keeping the bulk so we can use ~1500h instead of high-only 550h.
+def passes_residual_gate(cleaned: str, raw: str) -> bool:
+    if not cleaned:
+        return False
+    words = cleaned.split()
+    if len(words) < 2:
+        return False
+    # cleaning must not have nuked most of the content (i.e. raw wasn't mostly junk)
+    raw_gur = sum(1 for c in (raw or '') if '਀' <= c <= '੿')
+    if raw_gur and len(cleaned.replace(' ', '')) < 0.6 * raw_gur:
+        return False
+    return True
 
 
 def passes_simran_filter(text: str) -> bool:
@@ -107,7 +132,7 @@ def _worker_decode_shard(args):
     datasets arrow cache (which doubled disk → quota-exceeded). The HF Audio
     column is stored decode=False as a struct {bytes, path}; decode bytes with
     soundfile. File-level sharding (worker i gets files[i::N])."""
-    files, text_col, audio_outdir, leaked, shard_idx, quality_filter, limit = args
+    files, text_col, audio_outdir, leaked, shard_idx, include_residual, limit = args
     import io, numpy as np, soundfile as sf
     import pyarrow.parquet as pq
     audio_outdir = Path(audio_outdir)
@@ -123,11 +148,19 @@ def _worker_decode_shard(args):
             vid = ex.get("video_id", "") or ""
             if vid in leaked:
                 dropped += 1; continue
-            if quality_filter is not None and (ex.get("quality") or "") != quality_filter:
+            # v5 quality policy: `high` tier always kept (content+simran gated);
+            # `residual` (or unknown) tier kept only if include_residual AND it
+            # passes the stricter residual content gate. high-only ⇒ include_residual=False.
+            q = (ex.get("quality") or "").lower()
+            is_high = (q == "high")
+            if not is_high and not include_residual:
                 dropped += 1; continue
             raw = ex.get(text_col) or ex.get("transcription") or ex.get("text") or ""
-            text = normalize_gurbani_text(raw.strip() if isinstance(raw, str) else "")
+            raw = raw.strip() if isinstance(raw, str) else ""
+            text = normalize_gurbani_text(raw)
             if not text or not passes_simran_filter(text):
+                dropped += 1; continue
+            if not is_high and not passes_residual_gate(text, raw):
                 dropped += 1; continue
             au = ex.get("audio")
             try:
@@ -162,16 +195,16 @@ def _worker_decode_shard(args):
 
 def materialize_parallel(name: str, audio_outdir: Path, leaked: set[str],
                           text_col: str, num_workers: int,
-                          quality_filter: str | None = None, limit: int = 0):
+                          include_residual: bool = True, limit: int = 0):
     """Decode the whole dataset in parallel, return list of manifest entries.
     File-level sharding: worker i decodes files[i::N] directly via pyarrow."""
-    print(f"[{name}] resolving local parquet (limit={limit}) ...", flush=True)
+    print(f"[{name}] resolving local parquet (limit={limit}, include_residual={include_residual}) ...", flush=True)
     files = local_parquet_files(name, limit)   # download ONCE in main → workers read local
     nw = max(1, min(num_workers, len(files)))
     print(f"[{name}] {len(files)} parquet files; file-sharding across {nw} workers", flush=True)
 
     args_list = [
-        (files[i::nw], text_col, str(audio_outdir), leaked, i, quality_filter, limit)
+        (files[i::nw], text_col, str(audio_outdir), leaked, i, include_residual, limit)
         for i in range(nw)
     ]
     all_entries = []
@@ -225,19 +258,17 @@ def main() -> int:
     manifests_dir.mkdir(parents=True, exist_ok=True)
     audio_root = Path(args.audio_root)
 
-    # v4-clean training pool (set by /goal): kirtan = HIGH-only skeleton-clean
-    # verbatim from the 3 cleanv2 sources (×2 to stay dominant); bani-v4 = FULL
-    # pass-through (text is clean continuous gurbani, quality gate would wrongly
-    # drop 83% of valid Sukhmani-style spans). Text column is `text` on cleanv2.
-    # bani is capped to ~50h via even per-video subsample (keep a PORTION of each
-    # video's clips, not all) so all 174 bani videos stay represented but bani is a
-    # light clean regularizer, not 318h. kirtan = no cap (target_hours=None).
-    #   (repo, text_col, subdir, repeats, quality_filter, target_hours)
+    # v5 training pool: use ALL kirtan (high + content-gated residual ≈ ~1500h,
+    # not just the 550h high-only of v4) at ×1 — no ×2 over-narrowing, which made
+    # v4 overfit the high-tier distribution and regress on the canonical evals.
+    # bani-v4 raised 50h→250h (5× v4) to fix v4's sehaj regression. Labels are now
+    # >>-stripped + Gurmukhi-only (normalize_gurbani_text), residual content-gated.
+    #   (repo, text_col, subdir, repeats, include_residual, is_kirtan, target_hours)
     sources = [
-        ("surindersinghssj/gurbani-kirtan-yt-captions-300h-cleanv2", "text", "kirtan_300h",  2, "high", None),
-        ("surindersinghssj/gurbani-kirtan-v4-sgpc-cleanv2",          "text", "kirtan_sgpc",  2, "high", None),
-        ("surindersinghssj/gurbani-kirtan-v4-1000h-cleanv2",         "text", "kirtan_1000h", 2, "high", None),
-        ("surindersinghssj/gurbani-bani-v4-cleanv2",                 "text", "bani_v4",      1, None,   50),
+        ("surindersinghssj/gurbani-kirtan-yt-captions-300h-cleanv2", "text", "kirtan_300h",  1, True, True,  None),
+        ("surindersinghssj/gurbani-kirtan-v4-sgpc-cleanv2",          "text", "kirtan_sgpc",  1, True, True,  None),
+        ("surindersinghssj/gurbani-kirtan-v4-1000h-cleanv2",         "text", "kirtan_1000h", 1, True, True,  None),
+        ("surindersinghssj/gurbani-bani-v4-cleanv2",                 "text", "bani_v4",      1, True, False, 250),
     ]
 
     def jline(wav, dur, text):
@@ -253,13 +284,12 @@ def main() -> int:
     heldout_path = manifests_dir / "val_kirtan.jsonl"   # PRIMARY val = diverse held-out kirtan
     n_total = n_val = 0
     with train_path.open("w", encoding="utf-8") as f, heldout_path.open("w", encoding="utf-8") as fv:
-        for hf_id, text_col, subdir, repeats, quality_filter, target_hours in sources:
+        for hf_id, text_col, subdir, repeats, include_residual, is_kirtan, target_hours in sources:
             entries = materialize_parallel(hf_id, audio_root / subdir, leaked, text_col,
-                                           args.workers, quality_filter=quality_filter,
+                                           args.workers, include_residual=include_residual,
                                            limit=args.limit)
             if target_hours:
                 entries = subsample_to_hours(entries, target_hours)
-            is_kirtan = quality_filter == "high"   # kirtan sources only; bani has quality_filter=None
             tr = vl = 0
             for wav, dur, text, vid in entries:
                 if is_kirtan and is_val_video(vid):
@@ -276,19 +306,57 @@ def main() -> int:
     print(f"[train] {n_total} train entries → {train_path}", flush=True)
     print(f"[val]   {n_val} held-out kirtan clips → {heldout_path}", flush=True)
 
-    # Secondary references: the designated caption evals (kirtan = 1 video, sehaj = 2).
-    for hf_id, out_name, subdir in [
-        ("surindersinghssj/gurbani-kirtan-yt-captions-eval-canonical",   "val_kirtan_caption.jsonl", "eval_kirtan"),
-        ("surindersinghssj/gurbani-sehajpath-yt-captions-eval-canonical", "val_sehajpath.jsonl",      "eval_sehajpath"),
+    # Secondary references: the designated caption evals. These are scored against
+    # final_text (canonical SGGS), but the published sets are thin (kirtan = 1 video,
+    # sehaj = 2) and ~half the rows are `review`-grade with unreliable final_text.
+    # So we emit TWO manifests per eval: *_full.jsonl (all rows, continuity) and
+    # *_clean.jsonl (trustworthy rows only) — the v5 target is judged on _clean.
+    def is_clean_eval_row(ex) -> bool:
+        return ((ex.get("decision") in ("matched", "replaced", "fixed"))
+                and (ex.get("canonical_match_score") or 0) >= 0.8
+                and (ex.get("canonical_retrieval_margin") or 0) >= 0.3
+                and not ex.get("is_simran"))
+
+    import io, numpy as np, soundfile as sf
+    import pyarrow.parquet as pq
+    for hf_id, stem, subdir in [
+        ("surindersinghssj/gurbani-kirtan-yt-captions-eval-canonical",   "val_kirtan_caption", "eval_kirtan"),
+        ("surindersinghssj/gurbani-sehajpath-yt-captions-eval-canonical", "val_sehajpath",      "eval_sehajpath"),
     ]:
-        out_path = manifests_dir / out_name
-        with out_path.open("w", encoding="utf-8") as f:
-            entries = materialize_parallel(hf_id, audio_root / subdir, leaked=set(),
-                                           text_col="final_text", num_workers=args.workers,
-                                           limit=args.limit)
-            for wav, dur, text, vid in entries:
-                f.write(jline(wav, dur, text))
-        print(f"[eval] {out_path}", flush=True)
+        out_dir = audio_root / subdir
+        out_dir.mkdir(parents=True, exist_ok=True)
+        full_path = manifests_dir / f"{stem}.jsonl"          # all rows (continuity)
+        clean_path = manifests_dir / f"{stem}_clean.jsonl"    # trustworthy rows only (target)
+        n_full = n_clean = 0
+        files = local_parquet_files(hf_id, args.limit)
+        with full_path.open("w", encoding="utf-8") as ff, clean_path.open("w", encoding="utf-8") as fc:
+            for fp in files:
+                for ex in pq.read_table(fp).to_pylist():
+                    raw = ex.get("final_text") or ex.get("text") or ""
+                    text = normalize_gurbani_text(raw.strip() if isinstance(raw, str) else "")
+                    if not text:
+                        continue
+                    au = ex.get("audio")
+                    try:
+                        if isinstance(au, dict) and au.get("bytes") is not None:
+                            arr, sr = sf.read(io.BytesIO(au["bytes"]), dtype="float32")
+                        elif isinstance(au, dict) and au.get("array") is not None:
+                            arr = np.asarray(au["array"], dtype="float32"); sr = int(au.get("sampling_rate") or 16000)
+                        else:
+                            continue
+                    except Exception:
+                        continue
+                    if getattr(arr, "ndim", 1) > 1:
+                        arr = arr.mean(axis=1).astype("float32")
+                    clip_id = ex.get("clip_id") or f"{ex.get('video_id','x')}_{n_full:06d}"
+                    wav = str(out_dir / f"{clip_id}.flac")
+                    if not Path(wav).exists():
+                        sf.write(wav, arr, sr, format="FLAC", subtype="PCM_16")
+                    line = jline(wav, float(len(arr)) / sr, text)
+                    ff.write(line); n_full += 1
+                    if is_clean_eval_row(ex):
+                        fc.write(line); n_clean += 1
+        print(f"[eval] {full_path.name}: {n_full} rows | {clean_path.name}: {n_clean} clean rows", flush=True)
     return 0
 
 

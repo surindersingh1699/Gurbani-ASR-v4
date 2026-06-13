@@ -43,6 +43,8 @@ def main() -> int:
     ap.add_argument("--manifest", required=True, help="kirtan eval manifest jsonl")
     ap.add_argument("--decoder", default="rnnt", choices=["rnnt", "ctc"])
     ap.add_argument("--batch-size", type=int, default=16)
+    ap.add_argument("--language-id", default="pa")
+    ap.add_argument("--max-samples", type=int)
     ap.add_argument("--out", default="kirtan_eval.json")
     args = ap.parse_args()
 
@@ -51,6 +53,8 @@ def main() -> int:
     import nemo.collections.asr as nemo_asr
 
     rows = [json.loads(l) for l in open(args.manifest) if l.strip()]
+    if args.max_samples:
+        rows = rows[:args.max_samples]
     paths = [r["audio_filepath"] for r in rows]
     refs = [normalize_gurbani_text(r["text"]) for r in rows]
     print(f"[eval] {len(rows)} kirtan clips from {args.manifest}", flush=True)
@@ -65,7 +69,12 @@ def main() -> int:
     model = model.eval()
 
     t = time.time()
-    hyps = model.transcribe(paths, batch_size=args.batch_size, num_workers=4)
+    hyps = model.transcribe(
+        paths,
+        batch_size=args.batch_size,
+        num_workers=4,
+        language_id=args.language_id,
+    )
     if isinstance(hyps, tuple):          # hybrid can return (best, all)
         hyps = hyps[0]
     hyps = [h.text if hasattr(h, "text") else h for h in hyps]

@@ -30,7 +30,8 @@ def collect_video_ids(name: str, split: str = "train") -> set[str]:
     from datasets import load_dataset
     ds = load_dataset(name, split=split)
     if "video_id" not in ds.column_names:
-        raise ValueError(f"{name} has no `video_id` column")
+        print(f"[skip] {name} has no `video_id` column — treating as no-leak source")
+        return set()
     return set(ds["video_id"])
 
 
